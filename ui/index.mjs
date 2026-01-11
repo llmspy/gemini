@@ -666,12 +666,12 @@ const FileStoreDetails = {
                     newCategoryName.value = ''
                 }
 
-                // Switch to "uploading" sort to show upload progress
-                ext.setPrefs({ sortBy: 'uploading' })
-
                 if (categoryToUse != ext.prefs.category) {
                     selectCategory(categoryToUse)
                 }
+
+                // Switch to "uploading" sort to show upload progress
+                ext.setPrefs({ sortBy: 'uploading' })
 
                 await loadFilestores()
                 loadDocuments() // Refresh the main list and start polling

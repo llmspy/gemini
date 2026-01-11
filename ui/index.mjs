@@ -260,12 +260,12 @@ const FileStoreDetails = {
                         @click="selectCategory(null)"
                         type="button"
                         class="bg-white dark:bg-gray-800 shadow rounded-lg px-4 py-3 flex items-start hover:bg-gray-50 dark:hover:bg-gray-700 transition border-2"
-                        :class="selectedCategory === null ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-transparent'"
+                        :class="ext.prefs.category === null ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-transparent'"
                     >
                         <span class="text-2xl mr-3">📚</span>
                         <div class="min-w-0 flex-1 text-left">
                             <p class="text-sm font-medium text-gray-900 dark:text-white truncate"
-                               :class="{'text-blue-600 dark:text-blue-400': selectedCategory === null}">
+                               :class="{'text-blue-600 dark:text-blue-400': ext.prefs.category === null}">
                                 All Documents
                             </p>
                             <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -286,12 +286,12 @@ const FileStoreDetails = {
                         @click="selectCategory(cat.category)"
                         type="button"
                         class="bg-white dark:bg-gray-800 shadow rounded-lg px-4 py-3 flex items-start hover:bg-gray-50 dark:hover:bg-gray-700 transition border-2"
-                        :class="selectedCategory === cat.category ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-transparent'"
+                        :class="ext.prefs.category === cat.category ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-transparent'"
                     >
                         <span class="text-2xl mr-3">📁</span>
                         <div class="min-w-0 flex-1 text-left">
                             <p class="text-sm font-medium text-gray-900 dark:text-white truncate"
-                               :class="{'text-blue-600 dark:text-blue-400': selectedCategory === cat.category}">
+                               :class="{'text-blue-600 dark:text-blue-400': ext.prefs.category === cat.category}">
                                 {{ cat.category || 'Uncategorized' }}
                             </p>
                             <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -311,8 +311,8 @@ const FileStoreDetails = {
             <div class="mb-4 flex justify-between items-center gap-4">
                 <h3 class="text-lg font-medium text-gray-900 dark:text-white flex items-center space-x-1">
                     <span>Documents</span>
-                    <span v-if="selectedCategory !== null" class="text-base font-normal text-gray-500 dark:text-gray-400">
-                        in {{ selectedCategory === '' ? 'Uncategorized' : selectedCategory }}
+                    <span v-if="ext.prefs.category !== null" class="text-base font-normal text-gray-500 dark:text-gray-400">
+                        in {{ ext.prefs.category === '' ? 'Uncategorized' : ext.prefs.category }}
                     </span>
                 </h3>
                 <div class="flex items-center gap-2 flex-shrink-0">
@@ -337,9 +337,9 @@ const FileStoreDetails = {
                 :class="{'border-blue-500 bg-blue-50 dark:bg-blue-900/20': dragover}"
                 class="group relative transition-colors duration-200 text-center py-12 bg-gray-50 dark:bg-gray-800/50 rounded-lg border-2 border-dashed border-gray-300 dark:border-gray-700 mb-4 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800">
                 <div class="mx-auto h-12 w-12 text-gray-400 text-5xl mb-4">📄</div>
-                 <div v-if="(selectedCategory !== null && selectedCategory !== '') || newCategoryName" class="mb-3 flex items-center justify-center gap-1">
+                 <div v-if="(ext.prefs.category !== null && ext.prefs.category !== '') || newCategoryName" class="mb-3 flex items-center justify-center gap-1">
                     📁
-                    <span class="font-medium text-gray-900 dark:text-white">{{ newCategoryName || selectedCategory }}</span>
+                    <span class="font-medium text-gray-900 dark:text-white">{{ newCategoryName || ext.prefs.category }}</span>
                  </div>
                  <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
                     <span class="group-hover:text-blue-600">Upload a file</span> or drag and drop
@@ -347,54 +347,38 @@ const FileStoreDetails = {
                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Upload PDFs, Text files or Markdown to get started.</p>
             </div>
 
-            <div v-if="uploadedDocs.length > 0" class="mb-8">
-                <div class="flex justify-between">
-                    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Recent Uploads</h3>
-                    <button type="button" @click="uploadedDocs=[]" class="pr-2 text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:dark:text-gray-200">clear</button>
-                </div>
-                <div class="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-md">
-                    <ul class="divide-y divide-gray-200 dark:divide-gray-700">
-                        <li v-for="doc in uploadedDocs.reverse()" :key="doc.id">
-                            <div class="px-4 py-4 sm:px-6 flex items-center justify-between">
-                                <div class="flex items-center truncate">
-                                    <a :href="doc.url + '?download'" class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 truncate" :title="'Download ' + doc.displayName">{{ doc.displayName }}</a>
-                                </div>
-                                <div class="flex-shrink-0 flex items-center gap-2">
-                                    <span v-if="doc.error" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200" :title="doc.error">
-                                        Failed
-                                    </span>
-                                    <span v-else-if="doc.uploadedAt" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-                                        Completed
-                                    </span>
-                                    <span v-else-if="doc.startedAt" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">
-                                        Processing
-                                    </span>
-                                    <span v-else class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300">
-                                        Pending
-                                    </span>
-                                </div>
-                            </div>
-                        </li>
-                    </ul>
-                </div>
-            </div>
-
             <div class="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-md mb-8">
                <div class="px-4 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-900/50">
-                   <div class="relative max-w-xs w-full">
-                       <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                          <svg class="h-4 w-4 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
-                              <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd" />
-                          </svg>
+                   <div class="flex items-center gap-3">
+                       <div class="relative max-w-xs w-full">
+                           <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                              <svg class="h-4 w-4 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                                  <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd" />
+                              </svg>
+                           </div>
+                           <input type="text" v-model.lazy="ext.prefs.q" placeholder="Search"
+                               class="block w-full pl-9 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md leading-5 bg-white dark:bg-gray-700 placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-gray-900 dark:text-white">
                        </div>
-                       <input type="text" v-model.lazy="q" placeholder="Search"
-                           class="block w-full pl-9 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md leading-5 bg-white dark:bg-gray-700 placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-gray-900 dark:text-white">
+                       <select v-model="ext.prefs.sortBy" class="block rounded-md border-gray-300 dark:border-gray-600 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm dark:bg-gray-700 dark:text-white py-1.5 pl-3 pr-8">
+                           <option value="-uploadedAt">Newest First</option>
+                           <option value="uploadedAt">Oldest First</option>
+                           <option value="displayName">Name (A-Z)</option>
+                           <option value="-displayName">Name (Z-A)</option>
+                           <option value="-createdAt">Created (Newest)</option>
+                           <option value="createdAt">Created (Oldest)</option>
+                           <option value="-size">Size (Largest)</option>
+                           <option value="size">Size (Smallest)</option>
+                           <option value="uploading">Uploading</option>
+                       </select>
                    </div>
                    <div class="flex items-center gap-4 text-sm font-medium">
-                       <button v-if="page > 1" @click="page--; loadDocuments()" type="button" class="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 disabled:text-gray-400 disabled:cursor-not-allowed">
+                       <span v-if="!ext.prefs.q && totalPages > 0" class="text-gray-600 dark:text-gray-400">
+                           Page {{ ext.prefs.page }} of {{ totalPages }}
+                       </span>
+                       <button v-if="ext.prefs.page > 1" @click="ext.prefs.page--; loadDocuments()" type="button" class="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 disabled:text-gray-400 disabled:cursor-not-allowed">
                            &larr; previous
                        </button>
-                       <button v-if="docs.length >= 10" @click="page++; loadDocuments()" type="button" class="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 disabled:text-gray-400 disabled:cursor-not-allowed">
+                       <button v-if="ext.prefs.page < totalPages" @click="ext.prefs.page++; loadDocuments()" type="button" class="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 disabled:text-gray-400 disabled:cursor-not-allowed">
                            next &rarr;
                        </button>
                    </div>
@@ -420,18 +404,27 @@ const FileStoreDetails = {
                             </div>
                             <div class="flex-shrink-0 flex items-center gap-2">
                                 <button type="button" @click.stop="deleteDocument(doc)" class="ml-2 p-1 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors" title="Delete document">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"/></svg>
+                                    <svg class="size-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"/></svg>
+                                </button>
+                                <!-- Show loading indicator if document is being uploaded/processed -->
+                                <span v-if="doc.startedAt && !doc.uploadedAt && !doc.error" class="p-1 text-blue-600" title="Uploading to Gemini...">
+                                    <svg class="size-5 animate-spin" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2A10 10 0 1 0 22 12A10 10 0 0 0 12 2Zm0 18a8 8 0 1 1 8-8A8 8 0 0 1 12 20Z" opacity=".5"/><path fill="currentColor" d="M20 12h2A10 10 0 0 0 12 2V4A8 8 0 0 1 20 12Z"/></svg>
+                                </span>
+                                <!-- Show re-upload button only if document has been uploaded -->
+                                <button v-else-if="doc.uploadedAt" type="button" @click.stop="reuploadDocument(doc)" :disabled="reuploadingDocs.has(doc.id)" class="p-1 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" title="Re-upload document to Gemini">
+                                    <svg v-if="!reuploadingDocs.has(doc.id)" class="size-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path fill="currentColor" d="m346.231 284.746l-90.192-90.192l-90.192 90.192l22.627 22.627l51.565-51.565V496h32V255.808l51.565 51.565z"/><path fill="currentColor" d="M400 161.453V160c0-79.4-64.6-144-144-144S112 80.6 112 160v2.491A122.3 122.3 0 0 0 49.206 195.2A109.4 109.4 0 0 0 16 273.619c0 31.119 12.788 60.762 36.01 83.469C74.7 379.275 105.338 392 136.07 392H200v-32h-63.93C89.154 360 48 319.635 48 273.619c0-42.268 35.64-77.916 81.137-81.155L144 191.405V160a112 112 0 0 1 224 0v32.04l15.8.2c46.472.588 80.2 34.813 80.2 81.379C464 322.057 428.346 360 382.83 360H312v32h70.83a109.75 109.75 0 0 0 81.14-35.454c20.655-22.207 32.03-51.657 32.03-82.927c0-58.437-40.284-104.227-96-112.166"/></svg>
+                                    <svg v-else class="size-5 animate-spin" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2A10 10 0 1 0 22 12A10 10 0 0 0 12 2Zm0 18a8 8 0 1 1 8-8A8 8 0 0 1 12 20Z" opacity=".5"/><path fill="currentColor" d="M20 12h2A10 10 0 0 0 12 2V4A8 8 0 0 1 20 12Z"/></svg>
                                 </button>
                                 <span v-if="doc.error" class="text-red-600" :title="doc.error">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10s10-4.48 10-10S17.52 2 12 2m1 15h-2v-2h2zm0-4h-2V7h2z"/></svg>
+                                    <svg class="size-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10s10-4.48 10-10S17.52 2 12 2m1 15h-2v-2h2zm0-4h-2V7h2z"/></svg>
                                 </span>
                                 <span v-else-if="doc.state === 'STATE_ACTIVE'" class="text-green-600" title="Active">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 21a9 9 0 1 0 0-18a9 9 0 0 0 0 18m-.232-5.36l5-6l-1.536-1.28l-4.3 5.159l-2.225-2.226l-1.414 1.414l3 3l.774.774z" clip-rule="evenodd"/></svg>
+                                    <svg class="size-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 21a9 9 0 1 0 0-18a9 9 0 0 0 0 18m-.232-5.36l5-6l-1.536-1.28l-4.3 5.159l-2.225-2.226l-1.414 1.414l3 3l.774.774z" clip-rule="evenodd"/></svg>
                                 </span>
                                 <span v-else-if="doc.state" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ doc.state }}</span>
-                                <span @click.prevent.stop="createNewChat(storeId, { document: doc })" 
+                                <span @click.prevent.stop="createNewChat(storeId, { document: doc })"
                                     class="cursor-pointer text-2xl text-gray-600" :title="'Ask Gemini RAG about ' + doc.displayName">
-                                    <svg class="size-7 text-gray-400 dark:text-gray-600 hover:text-blue-600 dark:hover:text-blue-400" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
+                                    <svg class="size-6 text-gray-400 dark:text-gray-600 hover:text-blue-600 dark:hover:text-blue-400" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
                                 </span>
                             </div>
                        </div>
@@ -442,7 +435,50 @@ const FileStoreDetails = {
                </ul>
 
             </div>
-            
+
+            <div class="mb-8 flex justify-between items-center dark:border-gray-700">
+                <div>
+                   <h3 class="text-lg font-medium text-gray-900 dark:text-white">Sync Store</h3>
+                   <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Synchronize local and remote documents to detect any issues.</p>
+                   <div v-if="syncResult" class="mt-3 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+                       <div class="grid grid-cols-2 gap-3 text-sm">
+                           <div>
+                               <span class="font-medium text-gray-700 dark:text-gray-300">Status:</span>
+                               <span class="ml-2 text-gray-900 dark:text-white">{{ syncResult.status }}</span>
+                           </div>
+                           <div>
+                               <span class="font-medium text-gray-700 dark:text-gray-300">Documents:</span>
+                               <span class="ml-2 text-gray-900 dark:text-white">{{ syncResult.documents?.length || 0 }}</span>
+                           </div>
+                           <div v-if="syncResult.localMissing > 0" class="text-orange-600 dark:text-orange-400">
+                               <span class="font-medium">Local Missing:</span>
+                               <span class="ml-2">{{ syncResult.localMissing }}</span>
+                           </div>
+                           <div v-if="syncResult.remoteMissing > 0" class="text-orange-600 dark:text-orange-400">
+                               <span class="font-medium">Remote Missing:</span>
+                               <span class="ml-2">{{ syncResult.remoteMissing }}</span>
+                           </div>
+                           <div v-if="syncResult.missingMetadata > 0" class="text-orange-600 dark:text-orange-400">
+                               <span class="font-medium">Missing Metadata:</span>
+                               <span class="ml-2">{{ syncResult.missingMetadata }}</span>
+                           </div>
+                           <div v-if="syncResult.duplicateHashes > 0" class="text-orange-600 dark:text-orange-400">
+                               <span class="font-medium">Duplicate Hashes:</span>
+                               <span class="ml-2">{{ syncResult.duplicateHashes }}</span>
+                           </div>
+                       </div>
+                   </div>
+                </div>
+                <button type="button"
+                    @click="syncStore"
+                    :disabled="syncing"
+                    class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    <span v-if="syncing">Syncing...</span>
+                    <span v-else>Sync Store</span>
+                </button>
+            </div>
+
             <div class="flex justify-between items-center dark:border-gray-700">
                 <div>
                    <h3 class="text-lg font-medium text-gray-900 dark:text-white">Delete {{store.displayName}}</h3>
@@ -461,20 +497,18 @@ const FileStoreDetails = {
     `,
     emits: ['select', 'back'],
     setup(props, { emit }) {
-        const ctx = inject('ctx')
         const store = computed(() => ext.state.filestores?.find(s => s.id == props.storeId))
         const loading = ref(false)
         const fileInput = ref(null)
         const uploading = ref(false)
         const dragover = ref(false)
         const categories = ref([])
-        const uploadedDocs = ref([])
         const docs = ref([])
         const docsLoading = ref(false)
-        const page = ref(1)
-        const q = ref('')
-        const selectedCategory = ref(null)
         const newCategoryName = ref('')
+        const reuploadingDocs = ref(new Set())
+        const syncing = ref(false)
+        const syncResult = ref(null)
         let pollTimer = null
         let lastRequestId = 0
 
@@ -485,6 +519,18 @@ const FileStoreDetails = {
             }
         })
 
+        const currentCategoryCount = computed(() => {
+            if (ext.prefs.category === null) {
+                return total.value.count
+            }
+            const cat = categories.value.find(c => c.category === ext.prefs.category)
+            return cat ? cat.count : 0
+        })
+
+        const totalPages = computed(() => {
+            return Math.ceil(currentCategoryCount.value / 10)
+        })
+
         async function loadDocuments() {
             const requestId = ++lastRequestId
             docsLoading.value = true
@@ -492,15 +538,15 @@ const FileStoreDetails = {
                 const params = new URLSearchParams({
                     filestoreId: props.storeId,
                     take: 10,
-                    skip: (page.value - 1) * 10,
-                    sort: '-uploadedAt',
+                    skip: (ext.prefs.page - 1) * 10,
+                    sort: ext.prefs.sortBy || '-uploadedAt',
                 })
-                if (q.value) params.append('q', q.value)
-                if (selectedCategory.value !== null) {
-                    if (selectedCategory.value === '') {
+                if (ext.prefs.q) params.append('q', ext.prefs.q)
+                if (ext.prefs.category !== null) {
+                    if (ext.prefs.category === '') {
                         params.append('null', 'category')
                     } else {
-                        params.append('category', selectedCategory.value)
+                        params.append('category', ext.prefs.category)
                     }
                 }
 
@@ -518,6 +564,9 @@ const FileStoreDetails = {
                     }
                 })
                 docs.value = api.response
+
+                // Check if we should start/stop polling after loading docs
+                startPolling()
             } finally {
                 if (requestId === lastRequestId) {
                     docsLoading.value = false
@@ -542,8 +591,11 @@ const FileStoreDetails = {
         }
 
         function selectCategory(category) {
-            selectedCategory.value = category
-            page.value = 1
+            ext.setPrefs({ 
+                page: 1, 
+                category,
+                sortBy: ext.prefs.sortBy === 'uploading' ? '-uploadedAt' : ext.prefs.sortBy,
+            })
             loadDocuments()
         }
 
@@ -558,17 +610,17 @@ const FileStoreDetails = {
         }
 
         watch(() => props.storeId, () => {
-            uploadedDocs.value = []
-            page.value = 1
-            q.value = ''
-            selectedCategory.value = null
             newCategoryName.value = ''
+            ext.setPrefs({
+                page: 1,
+            })
             refresh()
         }, { immediate: true })
 
-        watch(q, () => {
-            page.value = 1
+        watch(() => [ext.prefs.sortBy, ext.prefs.q], () => {
+            ext.savePrefs()
             loadDocuments()
+            startPolling()
         })
 
         function formatDate(date) {
@@ -598,8 +650,8 @@ const FileStoreDetails = {
                 }
 
                 let url = `/filestores/${store.value.id}/upload`
-                // Use newCategoryName if being typed, otherwise use selectedCategory
-                const categoryToUse = newCategoryName.value.trim() || selectedCategory.value
+                // Use newCategoryName if being typed, otherwise use ext.prefs.category
+                const categoryToUse = newCategoryName.value.trim() || ext.prefs.category
 
                 if (categoryToUse !== null && categoryToUse !== '') {
                     url += `?category=${encodeURIComponent(categoryToUse)}`
@@ -607,20 +659,22 @@ const FileStoreDetails = {
 
                 const res = await ext.postForm(url, { body: formData })
                 if (!res.ok) throw new Error(res.statusText)
-                const newDocs = await res.json()
+                await res.json()
 
                 // If a new category was created via upload, clear the input and select it
                 if (newCategoryName.value.trim()) {
                     newCategoryName.value = ''
                 }
 
-                // Add new docs to the list, filtering out any that might already be there (unlikely but safe)
-                const newDocIds = new Set(newDocs.map(d => d.id))
-                uploadedDocs.value = [...newDocs, ...uploadedDocs.value.filter(d => !newDocIds.has(d.id))]
+                // Switch to "uploading" sort to show upload progress
+                ext.setPrefs({ sortBy: 'uploading' })
 
-                startPolling()
+                if (categoryToUse != ext.prefs.category) {
+                    selectCategory(categoryToUse)
+                }
+
                 await loadFilestores()
-                loadDocuments() // Refresh the main list too
+                loadDocuments() // Refresh the main list and start polling
                 refresh() // Refresh categories
             } catch (e) {
                 console.error("Upload failed", e)
@@ -631,53 +685,36 @@ const FileStoreDetails = {
             }
         }
 
-        function startPolling() {
-            if (pollTimer) return
-            poll()
-        }
-
-        async function poll() {
-            const pendingAuthDocs = uploadedDocs.value.filter(d => !d.uploadedAt && !d.error)
-            if (pendingAuthDocs.length === 0) {
-                pollTimer = null
-                return
-            }
-
+        async function pollDocuments() {
             try {
-                const ids = pendingAuthDocs.filter(d => d.id).map(d => d.id).join(',')
-                const api = await ext.getJson(`/documents?ids_in=${ids}`)
-                if (api.error) {
-                    ext.setError(api.error)
-                    return
-                }
-                const updatedDocs = api.response
-
-                // Update local docs
-                updatedDocs.forEach(updated => {
-                    const idx = uploadedDocs.value.findIndex(d => d.id === updated.id)
-                    if (idx !== -1) {
-                        uploadedDocs.value[idx] = updated
-                    }
-                })
-
-                // If any still pending, schedule next poll
-                // Also check if any *just* completed/failed, we might want to refresh filestores stats
-                const stillPending = updatedDocs.some(d => !d.uploadedAt && !d.error)
-
-                if (stillPending) {
-                    pollTimer = setTimeout(poll, 2000)
-                } else {
-                    pollTimer = null
-                    await loadFilestores() // Final refresh
-                    loadDocuments() // Refresh the main list
-                    setTimeout(refresh, 2000)
-                }
-
+                await loadDocuments()
             } catch (e) {
-                console.error("Polling failed", e)
-                pollTimer = setTimeout(poll, 5000) // Retry later on error
+                console.error("Polling documents failed", e)
             }
         }
+
+        function startPolling() {
+            // Clear existing timer
+            if (pollTimer) {
+                clearTimeout(pollTimer)
+                pollTimer = null
+            }
+
+            // Always poll if we're in "uploading" sort mode
+            if (ext.prefs.sortBy === 'uploading') {
+                console.log('Starting polling in uploading mode')
+                pollTimer = setTimeout(pollDocuments, 2000)
+            }
+        }
+
+        onMounted(() => {
+            ext.setPrefs({
+                page: ext.prefs.page || 1,
+                q: ext.prefs.q || '',
+                sortBy: ext.prefs.sortBy || '-uploadedAt',
+            })
+            startPolling()
+        })
 
         onUnmounted(() => {
             if (pollTimer) clearTimeout(pollTimer)
@@ -708,26 +745,75 @@ const FileStoreDetails = {
             }
         }
 
+        async function reuploadDocument(doc) {
+            if (!confirm(`Re-upload "${doc.displayName}" to Gemini?`)) return
+
+            reuploadingDocs.value.add(doc.id)
+            // Trigger reactivity
+            reuploadingDocs.value = new Set(reuploadingDocs.value)
+
+            try {
+                const api = await ext.postJson(`/documents/${doc.id}/upload`)
+                if (api.error) {
+                    ext.setError(api.error)
+                } else {
+                    if (api.response?.id) {
+                        ext.state.documentsCache[api.response.id] = api.response
+                    }
+                    await loadFilestores()
+                    await refresh()
+                }
+            } finally {
+                reuploadingDocs.value.delete(doc.id)
+                // Trigger reactivity
+                reuploadingDocs.value = new Set(reuploadingDocs.value)
+            }
+        }
+
+        async function syncStore() {
+            if (!store.value) return
+
+            syncing.value = true
+            syncResult.value = null
+
+            try {
+                const api = await ext.postJson(`/filestores/${store.value.id}/sync`)
+                if (api.error) {
+                    ext.setError(api.error)
+                } else {
+                    syncResult.value = api.response
+                    await loadFilestores()
+                    await refresh()
+                }
+            } finally {
+                syncing.value = false
+            }
+        }
+
         return {
+            ext,
             total,
+            currentCategoryCount,
+            totalPages,
             store,
             deleteStore,
             deleteDocument,
+            reuploadDocument,
+            reuploadingDocs,
+            syncStore,
+            syncing,
+            syncResult,
             loading,
             fileInput,
             handleFileUpload,
             uploading,
             onDrop,
             dragover,
-            uploadedDocs,
             docs,
-            page,
-            q,
             loadDocuments,
             docsLoading,
             formatDate,
             categories,
-            selectedCategory,
             selectCategory,
             newCategoryName,
             createNewCategory,

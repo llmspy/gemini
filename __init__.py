@@ -271,5 +271,124 @@ def install(ctx):
 
     ctx.add_get("filestores/{id}/categories", filestore_categories)
 
+    async def upload_document(request):
+        user = ctx.get_username(request)
+        id = int(request.match_info["id"])
+        doc = g_db.get_document(int(id), user=user)
+        if not doc:
+            raise Exception("Document does not exist")
+
+        if doc.get("name"):
+            try:
+                ctx.dbg(f"Deleting existing document {doc.get('name')} from filestore...")
+                g_client.file_search_stores.documents.delete(name=doc.get("name"), config={"force": True})
+            except Exception as e:
+                ctx.err(f"Could not delete document {doc.get('name')}", e)
+        
+        await g_db.update_document_async(id, {"error": None, "uploadedAt": None}, user=user)
+        g_worker.start()
+        while g_worker.running:
+            await asyncio.sleep(2)
+            doc = g_db.get_document(id, user=user)
+            if doc.get("uploadedAt") or doc.get("error"):
+                return web.json_response(document_dto(doc))
+        
+        return web.json_response(document_dto(doc))
+            
+    
+    ctx.add_post("documents/{id}/upload", upload_document)
+
+    async def sync_filestore_documents(request):
+        id = request.match_info["id"]
+        user = ctx.get_username(request)
+        filestore = g_db.get_filestore(int(id), user=user)
+        if not filestore:
+            raise Exception("Filestore does not exist")
+        
+        local_docs = g_db.query_documents({"filestoreId": int(id)}, user=user)
+        local_doc_names = {doc.get("name"): doc for doc in local_docs}
+        local_doc_ids = {doc.get("id"): doc for doc in local_docs}
+        local_doc_hashes = {doc.get("hash"): doc for doc in local_docs}
+
+        local_missing = []
+        remote_missing = []
+        missing_metadata = []
+        hash_counts = {}
+
+        def extract_custom_metadata(doc):
+            remote_id = None
+            remote_hash = None
+            if doc.custom_metadata:
+                for item in doc.custom_metadata:
+                    if item.key == "id" and item.numeric_value:
+                        remote_id = int(item.numeric_value)
+                    elif item.key == "hash" and item.string_value:
+                        remote_hash = item.string_value
+            return remote_id, remote_hash
+
+        pager = g_client.file_search_stores.documents.list(parent=filestore.get("name"))
+
+        # Track which remote documents we've seen
+        seen_remote_names = set()
+
+        # Extract documents from the result
+        documents = []
+        for doc in pager:
+            seen_remote_names.add(doc.name)
+
+            if doc.name not in local_doc_names:
+                local_missing.append(doc)
+                continue
+
+            local_doc = local_doc_names[doc.name]
+            orig_state = local_doc.get("state")
+            new_state = doc.state
+
+            remote_id, remote_hash = extract_custom_metadata(doc)
+            if not remote_id or not remote_hash:
+                new_state = "MISSING_METADATA"
+                missing_metadata.append({"doc": doc, "local": local_doc})
+            elif local_doc.get("id") != remote_id or local_doc.get("hash") != remote_hash:
+                # Metadata exists but doesn't match local doc
+                new_state = "METADATA_MISMATCH"
+
+            # Track hash occurrences to detect duplicates
+            if remote_hash:
+                hash_counts[remote_hash] = hash_counts.get(remote_hash, 0) + 1
+                if hash_counts[remote_hash] > 1:
+                    new_state = "DUPLICATE_HASH"
+
+            # Update state if it changed
+            if new_state != orig_state:
+                await g_db.update_document_async(
+                    local_doc.get("id"),
+                    {"state": new_state},
+                    user=user
+                )
+
+            documents.append(doc_to_dto(doc))
+
+        # Find local documents that don't exist in remote
+        for name, local_doc in local_doc_names.items():
+            if name and name not in seen_remote_names:
+                remote_missing.append(local_doc)
+                # Update state to indicate it's missing from remote
+                await g_db.update_document_async(
+                    local_doc.get("id"),
+                    {"state": "MISSING_FROM_REMOTE"},
+                    user=user
+                )
+
+        return web.json_response({
+            "status": "completed",
+            "documents": documents,
+            "localMissing": len(local_missing),
+            "remoteMissing": len(remote_missing),
+            "missingMetadata": len(missing_metadata),
+            "duplicateHashes": sum(1 for count in hash_counts.values() if count > 1),
+        })
+
+    ctx.add_post("filestores/{id}/sync", sync_filestore_documents)
+
 
 __install__ = install

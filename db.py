@@ -327,7 +327,13 @@ class GeminiDB:
                 sql_where += "(displayName LIKE :q)"
                 params["q"] = f"%{query['q']}%"
 
-            sql = f"{select_columns(all_columns, query.get('fields'), select=query.get('select'))} FROM {table} {sql_where} {order_by(all_columns, sort)} LIMIT :take OFFSET :skip"
+            if sort == "uploading":
+                sql_order_by = "ORDER BY CASE WHEN uploadedAt IS NULL AND error IS NULL THEN createdAt ELSE '9999-12-31' END, uploadedAt DESC"
+            else:
+                sql_order_by = order_by(all_columns, sort)
+            
+
+            sql = f"{select_columns(all_columns, query.get('fields'), select=query.get('select'))} FROM {table} {sql_where} {sql_order_by} LIMIT :take OFFSET :skip"
 
             if query.get("as") == "column":
                 return self.db.column(sql, params)

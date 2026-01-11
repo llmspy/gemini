@@ -1,0 +1,23 @@
+{
+    "contents": [
+        {
+            "parts": [
+                {
+                    "text": "example of a AutoQuery DTO?",
+                    "type": "DO NOT ASK THE USER TO READ THE MANUAL, pinpoint the relevant sections in the response itself."
+                }
+            ],
+            "role": "user"
+        }
+    ],
+    "tools": [
+        {
+            "fileSearch": {
+                "fileSearchStoreNames": [
+                    "fileSearchStores/chatsession1767975434016-rng0ukkrhr9y"
+                ]
+            }
+        }
+    ],
+    "generationConfig": {}
+}

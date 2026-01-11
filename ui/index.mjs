@@ -1,6 +1,8 @@
-import { ref, computed, inject, onUnmounted, toRef, watch } from 'vue'
+import { ref, computed, inject, onMounted, onUnmounted, toRef, watch } from 'vue'
+import { appendQueryString, lastLeftPart, leftPart, rightPart } from '@servicestack/client'
 
 let ext = null
+let ctx = null
 
 async function loadFilestores() {
     const api = await ext.getJson("/filestores")
@@ -9,6 +11,106 @@ async function loadFilestores() {
         return
     }
     ext.setState({ filestores: api.response })
+}
+
+async function loadDocumentsWithDisplayNames(filestoreId, displayNames) {
+    const cachedDocs = Object.values(ext.state.documentsCache)
+    const missingDisplayNames = displayNames
+        .filter(name => !cachedDocs.some(doc => doc.filestoreId === filestoreId && doc.displayName === name))
+
+    console.log("loadDocumentsWithDisplayNames", filestoreId, cachedDocs.length, displayNames, missingDisplayNames)
+    if (missingDisplayNames.length === 0) return
+    const api = await ext.getJson(
+        appendQueryString(`/documents`, {
+            filestoreId: filestoreId,
+            displayNames: missingDisplayNames.join(',')
+        })
+    )
+    if (api.error) {
+        ext.setError(api.error)
+        return
+    }
+    api.response?.forEach(doc => {
+        ext.state.documentsCache[doc.id] = doc
+    })
+}
+
+function getGeminiModel() {
+    const geminiModels = [
+        'gemini-flash-latest',
+        'gemini-flash-lite-latest',
+        'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
+        'gemini-2.5-pro',
+    ]
+    for (const modelId of geminiModels) {
+        const model = ctx.state.models
+            .find(x => x.id === modelId && x.provider === 'google')
+        if (model) return model
+    }
+    for (const modelId of geminiModels) {
+        const model = ctx.state.models.find(x => x.id === modelId)
+        if (model) return model
+    }
+    return null
+}
+
+function createNewChat(filestoreId, { category, document } = {}) {
+    console.log('createNewChat', category, document)
+    const model = getGeminiModel()
+    if (!model) {
+        ctx.setError({ message:'No Gemini model available.' })
+        return
+    }
+
+    const filestore = ext.state.filestores.find(s => s.id == filestoreId)
+    /*
+    Gemini Tool:
+    {
+        "file_search": {
+            "file_search_store_names": [
+                "fileSearchStores/servicestack-docs-3w65kkumaxcd"
+            ]
+        }
+    }
+    OpenAI Tool Call:
+    {
+        type: "file_search",
+        file_search: {
+            file_search_store_names: [
+                "fileSearchStores/servicestack-docs-3w65kkumaxcd"
+            ],
+            "metadata_filter": "category=api"
+        }
+    }
+    */
+
+    // OpenAI File Search Tool
+    const tool = {
+        type: "file_search",
+        file_search: {
+            file_search_store_names: [filestore.name]
+        }
+    }
+    if (category != null) {
+        tool.file_search.metadata_filter = `category=${category || ''}`
+        tool.category = category
+    } else if (document != null) {
+        tool.file_search.metadata_filter = `hash=${document.hash}`
+        tool.document = document.displayName
+    }
+    const tools = [tool]
+
+    const title = `Ask ${filestore.displayName}` + (category ? ` about ${category}` : document ? ` about ${document.displayName}` : '')
+    const thread = {
+        title,
+        model,
+        tools,
+        redirect: true
+    }
+    // console.log('startNewThread', JSON.stringify(thread, null, 4))
+    ctx.chat.setSelectedModel(model)
+    ctx.threads.startNewThread(thread)
 }
 
 const FileStoreList = {
@@ -45,27 +147,33 @@ const FileStoreList = {
                 <ul class="divide-y divide-gray-200 dark:divide-gray-700">
                     <li v-for="store in filestores" :key="store.id">
                         <button @click="$emit('select', store.id)" type="button" class="w-full block hover:bg-gray-50 dark:hover:bg-gray-700 transition duration-150 ease-in-out">
-                            <div class="px-4 py-4 sm:px-6">
-                                <div class="flex items-center justify-between">
-                                    <p class="text-sm font-medium text-blue-600 dark:text-blue-400 truncate">{{ store.displayName }}</p>
-                                    <div class="ml-2 flex-shrink-0 flex">
-                                        <p class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-                                            {{ store.activeDocumentsCount || 0 }} docs
-                                        </p>
+                            <div class="px-4 py-4 sm:px-6 flex items-start gap-3">
+                                <div class="flex-1 min-w-0">
+                                    <div class="flex items-center justify-between">
+                                        <p class="text-sm font-medium text-blue-600 dark:text-blue-400 truncate">{{ store.displayName }}</p>
+                                        <div class="ml-2 flex-shrink-0 flex">
+                                            <p class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                                                {{ store.activeDocumentsCount || 0 }} docs
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2 sm:flex sm:justify-between">
+                                        <div class="sm:flex">
+                                            <p class="flex items-center text-sm text-gray-500 dark:text-gray-400">
+                                                Created {{ $fmt.date(store.createdAt) }}
+                                            </p>
+                                        </div>
+                                        <div class="mt-2 flex items-center text-sm text-gray-500 dark:text-gray-400 sm:mt-0">
+                                            <p>
+                                                {{ $fmt.bytes(store.sizeBytes || 0) }}
+                                            </p>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="mt-2 sm:flex sm:justify-between">
-                                    <div class="sm:flex">
-                                        <p class="flex items-center text-sm text-gray-500 dark:text-gray-400">
-                                            Created {{ $fmt.date(store.createdAt) }}
-                                        </p>
-                                    </div>
-                                    <div class="mt-2 flex items-center text-sm text-gray-500 dark:text-gray-400 sm:mt-0">
-                                        <p>
-                                            {{ $fmt.bytes(store.sizeBytes || 0) }}
-                                        </p>
-                                    </div>
-                                </div>
+                                <span @click.prevent.stop="createNewChat(store.id)"
+                                    class="ml-2 cursor-pointer flex-shrink-0" :title="'Ask Gemini RAG about ' + store.displayName">
+                                    <svg class="size-10 text-gray-400 dark:text-gray-600 hover:text-blue-600 dark:hover:text-blue-400" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
+                                </span>
                             </div>
                         </button>
                     </li>
@@ -111,6 +219,7 @@ const FileStoreList = {
             filestores,
             createStore,
             formatDate,
+            createNewChat,
         }
     }
 }
@@ -136,23 +245,102 @@ const FileStoreDetails = {
                  <div class="flex items-center gap-2">
                      <input type="file" ref="fileInput" class="hidden" multiple @change="handleFileUpload">
                      <button type="button" 
-                        @click="fileInput.click()"
+                        @click="createNewChat(storeId)"
                         :disabled="uploading"
                         class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
                         <span v-if="uploading">Uploading...</span>
-                        <span v-else>Upload Documents</span>
+                        <span v-else>New Chat</span>
                      </button>
                  </div>
             </div>
-            
-            <div 
-                @drop.prevent="onDrop" 
-                @dragover.prevent="dragover = true" 
+
+            <div class="mb-8">
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3">
+                    <button
+                        @click="selectCategory(null)"
+                        type="button"
+                        class="bg-white dark:bg-gray-800 shadow rounded-lg px-4 py-3 flex items-start hover:bg-gray-50 dark:hover:bg-gray-700 transition border-2"
+                        :class="selectedCategory === null ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-transparent'"
+                    >
+                        <span class="text-2xl mr-3">📚</span>
+                        <div class="min-w-0 flex-1 text-left">
+                            <p class="text-sm font-medium text-gray-900 dark:text-white truncate"
+                               :class="{'text-blue-600 dark:text-blue-400': selectedCategory === null}">
+                                All Documents
+                            </p>
+                            <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                <div>{{ total.count }} document{{ total.count !== 1 ? 's' : '' }}</div>
+                                <div>{{ $fmt.bytes(total.size) }}</div>
+                            </div>
+                        </div>
+                        <span @click.prevent.stop="createNewChat(storeId)" 
+                            class="cursor-pointer text-2xl text-gray-600" title="Ask Gemini RAG about All Documents"
+                            >
+                            <svg class="size-7 text-gray-400 dark:text-gray-600 hover:text-blue-600 dark:hover:text-blue-400" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
+                        </span>
+                    </button>
+
+                    <button
+                        v-for="cat in categories"
+                        :key="cat.category"
+                        @click="selectCategory(cat.category)"
+                        type="button"
+                        class="bg-white dark:bg-gray-800 shadow rounded-lg px-4 py-3 flex items-start hover:bg-gray-50 dark:hover:bg-gray-700 transition border-2"
+                        :class="selectedCategory === cat.category ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-transparent'"
+                    >
+                        <span class="text-2xl mr-3">📁</span>
+                        <div class="min-w-0 flex-1 text-left">
+                            <p class="text-sm font-medium text-gray-900 dark:text-white truncate"
+                               :class="{'text-blue-600 dark:text-blue-400': selectedCategory === cat.category}">
+                                {{ cat.category || 'Uncategorized' }}
+                            </p>
+                            <div class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                <div>{{ cat.count }} document{{ cat.count !== 1 ? 's' : '' }}</div>
+                                <div>{{ $fmt.bytes(cat.size) }}</div>
+                            </div>
+                        </div>
+                        <span @click.prevent.stop="createNewChat(storeId, { category: cat.category })" 
+                            class="cursor-pointer text-2xl text-gray-600" :title="'Ask Gemini RAG about ' + (cat.category ? cat.category : 'Uncategorized') + ' documents'"
+                            >
+                            <svg class="size-7 text-gray-400 dark:text-gray-600 hover:text-blue-600 dark:hover:text-blue-400" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
+                        </span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="mb-4 flex justify-between items-center gap-4">
+                <h3 class="text-lg font-medium text-gray-900 dark:text-white flex items-center space-x-1">
+                    <span>Documents</span>
+                    <span v-if="selectedCategory !== null" class="text-base font-normal text-gray-500 dark:text-gray-400">
+                        in {{ selectedCategory === '' ? 'Uncategorized' : selectedCategory }}
+                    </span>
+                </h3>
+                <div class="flex items-center gap-2 flex-shrink-0">
+                    <div class="text-gray-400 dark:text-gray-500">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M13 19c0 .34.04.67.09 1H4a2 2 0 0 1-2-2V6c0-1.11.89-2 2-2h6l2 2h8a2 2 0 0 1 2 2v5.81c-.88-.51-1.9-.81-3-.81c-3.31 0-6 2.69-6 6m7-1v-3h-2v3h-3v2h3v3h2v-3h3v-2z"/></svg>
+                    </div>
+                    <input
+                        type="text"
+                        v-model="newCategoryName"
+                        @keyup.enter="createNewCategory"
+                        placeholder="New category"
+                        class="w-48 rounded-md border-gray-300 dark:border-gray-600 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm dark:bg-gray-700 dark:text-white px-3 py-1.5"
+                    >
+                </div>
+            </div>
+
+            <div
+                @drop.prevent="onDrop"
+                @dragover.prevent="dragover = true"
                 @dragleave.prevent="dragover = false"
                 @click="fileInput.click()"
                 :class="{'border-blue-500 bg-blue-50 dark:bg-blue-900/20': dragover}"
                 class="group relative transition-colors duration-200 text-center py-12 bg-gray-50 dark:bg-gray-800/50 rounded-lg border-2 border-dashed border-gray-300 dark:border-gray-700 mb-4 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800">
                 <div class="mx-auto h-12 w-12 text-gray-400 text-5xl mb-4">📄</div>
+                 <div v-if="(selectedCategory !== null && selectedCategory !== '') || newCategoryName" class="mb-3 flex items-center justify-center gap-1">
+                    📁
+                    <span class="font-medium text-gray-900 dark:text-white">{{ newCategoryName || selectedCategory }}</span>
+                 </div>
                  <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
                     <span class="group-hover:text-blue-600">Upload a file</span> or drag and drop
                  </h3>
@@ -166,7 +354,7 @@ const FileStoreDetails = {
                 </div>
                 <div class="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-md">
                     <ul class="divide-y divide-gray-200 dark:divide-gray-700">
-                        <li v-for="doc in uploadedDocs" :key="doc.id">
+                        <li v-for="doc in uploadedDocs.reverse()" :key="doc.id">
                             <div class="px-4 py-4 sm:px-6 flex items-center justify-between">
                                 <div class="flex items-center truncate">
                                     <a :href="doc.url + '?download'" class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 truncate" :title="'Download ' + doc.displayName">{{ doc.displayName }}</a>
@@ -199,7 +387,7 @@ const FileStoreDetails = {
                               <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd" />
                           </svg>
                        </div>
-                       <input type="text" v-model.lazy="q" placeholder="Search" 
+                       <input type="text" v-model.lazy="q" placeholder="Search"
                            class="block w-full pl-9 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md leading-5 bg-white dark:bg-gray-700 placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-gray-900 dark:text-white">
                    </div>
                    <div class="flex items-center gap-4 text-sm font-medium">
@@ -215,16 +403,25 @@ const FileStoreDetails = {
                    <li v-for="doc in docs" :key="doc.id">
                        <div class="px-4 py-4 sm:px-6 flex items-center justify-between">
                             <div class="flex items-center min-w-0 flex-1">
-                                <div class="min-w-0 flex-1 mr-4">
-                                   <a :href="doc.url + '?download'" class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 truncate" :title="'Download ' + doc.displayName">{{ doc.displayName }}</a>
+                                <div class="text-sm min-w-0 flex-1 mr-4">
+                                   <div class="flex items-center gap-x-1">
+                                       <span v-if="doc.category" class="cursor-pointer inline-flex items-center rounded font-medium text-gray-800 dark:text-gray-200" @click="selectCategory(doc.category)">
+                                           📂 {{ doc.category }}
+                                       </span>
+                                       <span v-if="doc.category">/</span>
+                                       <a :href="doc.url + '?download'" class="font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 truncate" :title="'Download ' + doc.displayName">{{ doc.displayName }}</a>
+                                   </div>
                                    <div class="flex items-center mt-1">
-                                       <span class="flex-shrink-0 text-xs text-gray-500 dark:text-gray-400">
+                                       <span class="flex-shrink-0 text-gray-500 dark:text-gray-400">
                                            {{ $fmt.bytes(doc.size) }} &middot; {{ $fmt.date(doc.uploadedAt || doc.createdAt) }}
                                        </span>
                                    </div>
                                 </div>
                             </div>
                             <div class="flex-shrink-0 flex items-center gap-2">
+                                <button type="button" @click.stop="deleteDocument(doc)" class="ml-2 p-1 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors" title="Delete document">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M7 21q-.825 0-1.412-.587T5 19V6H4V4h5V3h6v1h5v2h-1v13q0 .825-.587 1.413T17 21zM17 6H7v13h10zM9 17h2V8H9zm4 0h2V8h-2zM7 6v13z"/></svg>
+                                </button>
                                 <span v-if="doc.error" class="text-red-600" :title="doc.error">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10s10-4.48 10-10S17.52 2 12 2m1 15h-2v-2h2zm0-4h-2V7h2z"/></svg>
                                 </span>
@@ -232,6 +429,10 @@ const FileStoreDetails = {
                                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 21a9 9 0 1 0 0-18a9 9 0 0 0 0 18m-.232-5.36l5-6l-1.536-1.28l-4.3 5.159l-2.225-2.226l-1.414 1.414l3 3l.774.774z" clip-rule="evenodd"/></svg>
                                 </span>
                                 <span v-else-if="doc.state" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ doc.state }}</span>
+                                <span @click.prevent.stop="createNewChat(storeId, { document: doc })" 
+                                    class="cursor-pointer text-2xl text-gray-600" :title="'Ask Gemini RAG about ' + doc.displayName">
+                                    <svg class="size-7 text-gray-400 dark:text-gray-600 hover:text-blue-600 dark:hover:text-blue-400" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
+                                </span>
                             </div>
                        </div>
                    </li>
@@ -260,6 +461,7 @@ const FileStoreDetails = {
     `,
     emits: ['select', 'back'],
     setup(props, { emit }) {
+        const ctx = inject('ctx')
         const store = computed(() => ext.state.filestores?.find(s => s.id == props.storeId))
         const loading = ref(false)
         const fileInput = ref(null)
@@ -271,8 +473,17 @@ const FileStoreDetails = {
         const docsLoading = ref(false)
         const page = ref(1)
         const q = ref('')
+        const selectedCategory = ref(null)
+        const newCategoryName = ref('')
         let pollTimer = null
         let lastRequestId = 0
+
+        const total = computed(() => {
+            return {
+                count: categories.value.reduce((sum, c) => sum + c.count, 0),
+                size: categories.value.reduce((sum, c) => sum + c.size, 0),
+            }
+        })
 
         async function loadDocuments() {
             const requestId = ++lastRequestId
@@ -285,6 +496,13 @@ const FileStoreDetails = {
                     sort: '-uploadedAt',
                 })
                 if (q.value) params.append('q', q.value)
+                if (selectedCategory.value !== null) {
+                    if (selectedCategory.value === '') {
+                        params.append('null', 'category')
+                    } else {
+                        params.append('category', selectedCategory.value)
+                    }
+                }
 
                 const api = await ext.getJson(`/documents?${params.toString()}`)
                 if (requestId !== lastRequestId) return
@@ -293,6 +511,12 @@ const FileStoreDetails = {
                     console.error("Failed to load docs", api.error)
                     return
                 }
+                api.response?.forEach(doc => {
+                    const completed = doc.uploadedAt || doc.error
+                    if (completed) {
+                        ext.state.documentsCache[doc.id] = doc
+                    }
+                })
                 docs.value = api.response
             } finally {
                 if (requestId === lastRequestId) {
@@ -305,6 +529,7 @@ const FileStoreDetails = {
             const api = await ext.getJson(`/filestores/${props.storeId}/categories`)
             if (api.error) {
                 ext.setError(api.error)
+                return
             }
             categories.value = api.response || []
         }
@@ -316,10 +541,28 @@ const FileStoreDetails = {
             ])
         }
 
+        function selectCategory(category) {
+            selectedCategory.value = category
+            page.value = 1
+            loadDocuments()
+        }
+
+        function createNewCategory() {
+            if (!newCategoryName.value.trim()) return
+
+            const categoryName = newCategoryName.value.trim()
+            newCategoryName.value = ''
+
+            // Select the newly created category
+            selectCategory(categoryName)
+        }
+
         watch(() => props.storeId, () => {
             uploadedDocs.value = []
             page.value = 1
             q.value = ''
+            selectedCategory.value = null
+            newCategoryName.value = ''
             refresh()
         }, { immediate: true })
 
@@ -354,9 +597,22 @@ const FileStoreDetails = {
                     formData.append('file', files[i])
                 }
 
-                const res = await ext.postForm(`/filestores/${store.value.id}/upload`, { body: formData })
+                let url = `/filestores/${store.value.id}/upload`
+                // Use newCategoryName if being typed, otherwise use selectedCategory
+                const categoryToUse = newCategoryName.value.trim() || selectedCategory.value
+
+                if (categoryToUse !== null && categoryToUse !== '') {
+                    url += `?category=${encodeURIComponent(categoryToUse)}`
+                }
+
+                const res = await ext.postForm(url, { body: formData })
                 if (!res.ok) throw new Error(res.statusText)
                 const newDocs = await res.json()
+
+                // If a new category was created via upload, clear the input and select it
+                if (newCategoryName.value.trim()) {
+                    newCategoryName.value = ''
+                }
 
                 // Add new docs to the list, filtering out any that might already be there (unlikely but safe)
                 const newDocIds = new Set(newDocs.map(d => d.id))
@@ -365,6 +621,7 @@ const FileStoreDetails = {
                 startPolling()
                 await loadFilestores()
                 loadDocuments() // Refresh the main list too
+                refresh() // Refresh categories
             } catch (e) {
                 console.error("Upload failed", e)
                 alert("Upload failed: " + (e.message || "Unknown error"))
@@ -439,7 +696,43 @@ const FileStoreDetails = {
             }
         }
 
-        return { store, deleteStore, loading, fileInput, handleFileUpload, uploading, onDrop, dragover, uploadedDocs, docs, page, q, loadDocuments, docsLoading, formatDate }
+        async function deleteDocument(doc) {
+            if (!confirm(`Are you sure you want to delete "${doc.displayName}"? This cannot be undone.`)) return
+
+            const api = await ext.deleteJson("/documents/" + doc.id)
+            if (api.error) {
+                ext.setError(api.error)
+            } else {
+                await loadFilestores()
+                await refresh()
+            }
+        }
+
+        return {
+            total,
+            store,
+            deleteStore,
+            deleteDocument,
+            loading,
+            fileInput,
+            handleFileUpload,
+            uploading,
+            onDrop,
+            dragover,
+            uploadedDocs,
+            docs,
+            page,
+            q,
+            loadDocuments,
+            docsLoading,
+            formatDate,
+            categories,
+            selectedCategory,
+            selectCategory,
+            newCategoryName,
+            createNewCategory,
+            createNewChat,
+        }
     }
 }
 
@@ -478,9 +771,187 @@ const GeminiPage = {
     }
 }
 
+const GeminiHeader = {
+    template:`
+        <div v-if="fileSearch" class="flex space-x-1 items-center cursor-pointer text-xs rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition-colors border hover:border-gray-300 dark:hover:border-gray-700"
+            :title="fileSearch.description ? fileSearch.description : 'Gemini File Search'"
+            @click="fileSearch.url ? $ctx.to(fileSearch.url) : null" style="line-height: 20px;"
+        >
+            <svg class="ml-1 size-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><title>Gemini File Search</title><path fill="currentColor" d="m19.6 21l-6.3-6.3q-.75.6-1.725.95T9.5 16q-2.725 0-4.612-1.888T3 9.5t1.888-4.612T9.5 3t4.613 1.888T16 9.5q0 1.1-.35 2.075T14.7 13.3l6.3 6.3zM9.5 14q1.875 0 3.188-1.312T14 9.5t-1.312-3.187T9.5 5T6.313 6.313T5 9.5t1.313 3.188T9.5 14"/></svg>
+            <span class="inline-block mr-1">{{fileSearch.description}}</span>
+            <span v-if="fileSearch.category" class="bg-gray-200 dark:bg-gray-700 px-1 font-semibold" :title="'Search in category ' + fileSearch.category">
+                📂{{fileSearch.category}}
+            </span>
+            <span v-else-if="fileSearch.document" class="bg-gray-200 dark:bg-gray-700 px-1 font-semibold" :title="'Search in document ' + fileSearch.document">
+                📄 {{fileSearch.document}}
+            </span>
+            <span v-else class="mr-1" title="Search All Documents">📚</span>
+        </div>
+    `,
+    props: {
+        thread: Object
+    },
+    setup(props) {
+        const fileSearch = computed(() => {
+            const def = props.thread.tools?.find(t => t.type === 'file_search')
+            const tool = def?.file_search
+            if (!tool) return null
+            const filestoreName = tool.file_search_store_names[0]
+            const ret = {
+                name: filestoreName || 'File Search',
+                description: lastLeftPart(rightPart(filestoreName || '', '/'), '-') || '',
+            }
+            if (def.category) {
+                ret.category = def.category
+            }
+            if (def.document) {
+                ret.document = def.document
+            }
+            const filestore = ext.state.filestores?.find(f => f.name === filestoreName)
+            if (filestore) {
+                ret.description = filestore.displayName
+                ret.url = `/gemini/filestores/${filestore.id}`
+            }
+            if (!ret.category && tool.metadata_filter) {
+                const field = leftPart(tool.metadata_filter, '=')
+                const value = rightPart(tool.metadata_filter, '=')
+                if (field === 'category' && value) {
+                    ret.category = value
+                }
+            }
+            return ret
+        })
+        return {
+            fileSearch
+        }        
+    }
+}
+
+const GeminiFooter = {
+    template:`
+        <div v-if="hasMetadata" class="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4 space-y-4">
+            <!-- Grounding Sources -->
+            <div v-if="groundingChunks.length > 0" class="space-y-2">
+                <div class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                    </svg>
+                    <span>Sources ({{ groundingChunks.length }})</span>
+                </div>
+                <div class="grid grid-cols-1 gap-2">
+                    <div v-for="(chunk, idx) in groundingChunks" :key="idx"
+                        class="group relative bg-gray-50 dark:bg-gray-800 rounded-lg p-3 border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-600 transition-colors">
+                        <div class="flex items-start justify-between gap-2"
+                            @click="chunk.retrievedContext.text && toggleChunk(idx)"
+                            :class="{'cursor-pointer': chunk.retrievedContext.text}">
+                            <div class="flex-1 min-w-0">
+                                <div v-if="getDocument(chunk)">
+                                    <a
+                                        @click.stop
+                                        :href="getDocument(chunk).url + '?download'"
+                                        class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 truncate"
+                                        :title="'Download ' + chunk.retrievedContext.title">
+                                        {{ chunk.retrievedContext.title }}
+                                    </a>
+                                </div>
+                                <div v-else class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
+                                    {{ chunk.retrievedContext.title }}
+                                </div>
+                                <div v-if="chunk.retrievedContext.text" class="mt-1 text-xs text-gray-600 dark:text-gray-400 line-clamp-2">
+                                    {{ chunk.retrievedContext.text.substring(0, 150) }}{{ chunk.retrievedContext.text.length > 150 ? '...' : '' }}
+                                </div>
+                            </div>
+                            <div
+                                v-if="chunk.retrievedContext.text"
+                                class="flex-shrink-0 p-1 text-gray-400 transition-colors pointer-events-none"
+                                :title="expandedChunks.has(idx) ? 'Show less' : 'Show more'">
+                                <svg class="w-4 h-4 transition-transform" :class="{'rotate-180': expandedChunks.has(idx)}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="6 9 12 15 18 9"/>
+                                </svg>
+                            </div>
+                        </div>
+                        <div v-if="expandedChunks.has(idx) && chunk.retrievedContext.text" class="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                            <div class="prose prose-sm max-w-none dark:prose-invert whitespace-wrap" style="font-size:13px" v-html="$fmt.markdown(chunk.retrievedContext.text)"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `,
+    props: {
+        thread: Object
+    },
+    setup(props) {
+        const expandedChunks = ref(new Set())
+
+        const groundingChunks = computed(() => {
+            const candidate = props.thread?.providerResponse?.candidates?.[0]
+            const chunks = candidate?.groundingMetadata?.groundingChunks || []
+            return chunks
+        })
+
+        const modelVersion = computed(() => {
+            return props.thread?.providerResponse?.modelVersion
+        })
+
+        const hasMetadata = computed(() => {
+            return groundingChunks.value.length > 0
+        })
+
+        function getDocument(chunk) {
+            const title = chunk.retrievedContext?.title
+            if (!title) return null
+            const docs = Object.values(ext.state.documentsCache)
+            return docs.find(doc => doc.displayName === title)
+        }
+
+        function toggleChunk(idx) {
+            if (expandedChunks.value.has(idx)) {
+                expandedChunks.value.delete(idx)
+            } else {
+                expandedChunks.value.add(idx)
+            }
+            // Trigger reactivity
+            expandedChunks.value = new Set(expandedChunks.value)
+        }
+
+        function loadDocumentChunks(chunks) {
+            // Load documents for all grounding chunks
+            const filestoreNames = chunks.map(c => c.retrievedContext?.fileSearchStore).filter(Boolean)
+            filestoreNames.forEach(name => {
+                const filestore = ext.state.filestores.find(fs => fs.name === name)
+                if (!filestore) return
+                const displayNames = new Set(chunks
+                    .filter(c => c.retrievedContext?.fileSearchStore === name)
+                    .map(c => c.retrievedContext?.title)
+                    .filter(Boolean))
+                if (displayNames.size > 0) {
+                    loadDocumentsWithDisplayNames(filestore.id, [...displayNames])
+                }
+            })
+        }
+
+        onMounted(() => {
+            loadDocumentChunks(groundingChunks.value)
+        })
+
+        return {
+            ext,
+            expandedChunks,
+            groundingChunks,
+            modelVersion,
+            hasMetadata,
+            getDocument,
+            toggleChunk,
+        }
+    }
+}
+
 export default {
-    install(ctx) {
-        ext = ctx.scope('gemini')
+    install(context) {
+        ext = context.scope('gemini')
+        ctx = context
 
         ctx.setLeftIcons({
             gemini: {
@@ -497,8 +968,28 @@ export default {
             { path: '/gemini/filestores/:id', component: GeminiPage, meta: { title: 'File Store' } }
         )
 
+        ctx.setThreadHeaders({
+            gemini: {
+                component: GeminiHeader,
+                show({ thread }) {
+                    console.log("Checking GeminiHeader show for thread", thread)
+                    return (thread.tools || []).filter(x => x.type === 'file_search').length
+                }
+            }
+        })
+
+        ctx.setThreadFooters({
+            gemini: {
+                component: GeminiFooter,
+                show({ thread }) {
+                    return thread.provider === 'google' || thread.model?.toLowerCase().includes('gemini')
+                }
+            }
+        })
+
         ext.setState({
-            filestores: []
+            filestores: [],
+            documentsCache: {},
         })
     },
 

@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 import time
@@ -13,7 +14,9 @@ class UploadWorker:
         self.ctx = ctx
         self.running = False
         self.lock = threading.Lock()
-        self.db = db.clone()  # can't share pooled read connections across multiple threads
+        self.db = (
+            db.clone()
+        )  # can't share pooled read connections across multiple threads
         self.client = client
 
     def start(self):
@@ -53,7 +56,9 @@ class UploadWorker:
             for filestore_id in filestore_ids:
                 filestore = self.db.get_filestore(filestore_id)
                 if filestore:
-                    result = self.client.file_search_stores.get(name=filestore.get("name"))
+                    result = self.client.file_search_stores.get(
+                        name=filestore.get("name")
+                    )
                     if result:
                         self.db.update_filestore(
                             filestore.get("id"),
@@ -112,16 +117,26 @@ class UploadWorker:
                 {"key": "hash", "string_value": doc.get("hash")},
             ]
             if doc.get("category"):
-                custom_metadata.append({"key": "category", "string_value": doc.get("category")})
+                custom_metadata.append(
+                    {"key": "category", "string_value": doc.get("category")}
+                )
+
+            config = {
+                "display_name": doc.get("displayName"),
+                "custom_metadata": custom_metadata,
+                # fails with mime_type application/json, uploading .json succeeds without it
+                # "mime_type": doc.get("mimeType"),
+            }
+            if self.ctx.debug:
+                self.ctx.dbg(
+                    f"Uploading {doc.get('displayName')} to {store_name}\n"
+                    + json.dumps(config, indent=2)
+                )
 
             operation = self.client.file_search_stores.upload_to_file_search_store(
                 file_search_store_name=store_name,
                 file=full_path,
-                config={
-                    "display_name": doc.get("displayName"),
-                    "mime_type": doc.get("mimeType"),
-                    "custom_metadata": custom_metadata,
-                },
+                config=config,
             )
 
             while not operation.done:
@@ -158,4 +173,6 @@ class UploadWorker:
         except Exception as e:
             self.ctx.err(f"Failed to upload doc {doc.get('id')}", e)
             if doc_id:
-                db.update_document(doc_id, {"error": self.ctx.error_message(e)}, user=user)
+                db.update_document(
+                    doc_id, {"error": self.ctx.error_message(e)}, user=user
+                )

@@ -7,6 +7,7 @@ import time
 
 from aiohttp import web
 from google import genai
+from google.genai.errors import ClientError
 
 from .db import GeminiDB
 from .upload_worker import UploadWorker
@@ -46,7 +47,7 @@ def install(ctx):
         return row and g_db.to_dto(row, ["metadata"])
 
     def document_dto(row):
-        return row and g_db.to_dto(row, ["category", "metadata", "customMetadata"])
+        return row and g_db.to_dto(row, ["metadata", "customMetadata"])
 
     async def query_filestores(request):
         rows = g_db.query_filestores(request.query, user=ctx.get_username(request))
@@ -219,12 +220,31 @@ def install(ctx):
         if not row:
             raise Exception("Document does not exist")
 
-        g_client.file_search_stores.documents.delete(name=row.get("name"))
+        try:
+            g_client.file_search_stores.documents.delete(name=row.get("name"), config={"force": True})
+        except ClientError as e:
+            if e.code == 404:
+                ctx.dbg(f"Document {row.get('name')} already deleted in Gemini")
+            else:
+                raise Exception(f"Could not delete document {row.get('name')}: {e.message or e.status}")
 
         g_db.delete_document(id, user=user)
         return web.json_response({})
 
     ctx.add_delete("documents/{id}", delete_document)
+
+    def doc_to_dto(doc):
+        # Extract serializable dict from the document result
+        return {
+            "name": doc.name,
+            "displayName": doc.display_name,
+            "mimeType": doc.mime_type,
+            "sizeBytes": doc.size_bytes,
+            "createTime": doc.create_time.isoformat(),
+            "updateTime": doc.update_time.isoformat(),
+            "state": doc.state,
+            "customMetadata": g_db.custom_metadata_dto(doc.custom_metadata),
+        }
 
     async def filestore_documents(request):
         id = request.match_info["id"]
@@ -234,37 +254,19 @@ def install(ctx):
         if not filestore:
             raise Exception("Filestore does not exist")
 
-        # Get paging parameters from query string
-        # page_token = request.query.get("pageToken")
-
         # Call Gemini API to list documents
         pager = g_client.file_search_stores.documents.list(parent=filestore.get("name"))
-
-        # Extract documents from the result
         documents = []
         for doc in pager:
-            documents.append(
-                {
-                    "name": doc.name,
-                    "displayName": doc.display_name,
-                    "mimeType": doc.mime_type,
-                    "sizeBytes": doc.size_bytes,
-                    "createTime": doc.create_time.isoformat(),
-                    "updateTime": doc.update_time.isoformat(),
-                    "state": doc.state,
-                    "customMetadata": g_db.custom_metadata_dto(doc.custom_metadata),
-                }
-            )
+            documents.append(doc_to_dto(doc))
         return web.json_response(documents)
 
     ctx.add_get("filestores/{id}/documents", filestore_documents)
 
     async def filestore_categories(request):
         id = request.match_info["id"]
-        categories = g_db.query_documents(
-            {"filestoreId": int(id), "fields": "category", "as": "column", "select": "distinct"},
-            user=ctx.get_username(request),
-        )
+        user = ctx.get_username(request)
+        categories = g_db.document_categories(int(id), user=user)
         return web.json_response(categories)
 
     ctx.add_get("filestores/{id}/categories", filestore_categories)

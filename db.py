@@ -310,6 +310,18 @@ class GeminiDB:
                     sql_where += " AND id IN (" + ",".join([f":{p}" for p in id_params]) + ")"
                     params.update(id_params)
 
+            displaynames_in = query.get("displayNames")
+            if displaynames_in:
+                names = displaynames_in if isinstance(displaynames_in, list) else displaynames_in.split(",")
+                name_params = {}
+                if len(names) > 0:
+                    i = 0
+                    for name in names:
+                        name_params[f"name_{i}"] = name
+                        i = i + 1
+                    sql_where += " AND displayName IN (" + ",".join([f":{p}" for p in name_params]) + ")"
+                    params.update(name_params)
+
             if "q" in query:
                 sql_where += " AND " if sql_where else "WHERE "
                 sql_where += "(displayName LIKE :q)"
@@ -325,6 +337,10 @@ class GeminiDB:
         except Exception as e:
             self.ctx.err(f"query_documents ({take}, {skip})", e)
             return []
+
+    def get_document(self, id, user=None):
+        sql_where, params = self.get_user_filter(user, {"id": id})
+        return self.db.one(f"SELECT * FROM document {sql_where} AND id = :id", params)
 
     def find_document(self, query, user=None):
         sql_where, params = self.sql_filter(self.columns["document"].keys(), query, user=user)
@@ -378,6 +394,13 @@ class GeminiDB:
     def delete_document(self, id, user=None, callback=None):
         sql_where, params = self.get_user_filter(user, {"id": id})
         self.db.write(f"DELETE FROM document {sql_where} AND id = :id", params, callback)
+
+    def document_categories(self, id, user=None):
+        sql_where, params = self.get_user_filter(user, {"id": id})
+        return self.db.all(
+            f"SELECT IFNULL(category, '') AS category, COUNT(*) as count, SUM(size) AS size FROM document {sql_where} GROUP BY category ORDER BY category",
+            params,
+        )
 
     def custom_metadata_dto(self, custom_metadata):
         if custom_metadata is None:

@@ -4,6 +4,8 @@ from typing import Any, Dict
 
 from llms.db import DbManager, order_by, select_columns, to_dto, valid_columns
 
+MIN_DATE = '0000-01-01'
+MAX_DATE = '9999-12-31'
 
 def with_user(data, user):
     if user is None:
@@ -223,7 +225,12 @@ class GeminiDB:
                 sql_where += "(displayName LIKE :q)"
                 params["q"] = f"%{query['q']}%"
 
-            sql = f"{select_columns(all_columns, query.get('fields'), select=query.get('select'))} FROM {table} {sql_where} {order_by(all_columns, sort)} LIMIT :take OFFSET :skip"
+            if sort == "failed":
+                sql_order_by = "ORDER BY CASE WHEN error IS NOT NULL OR failedDocumentsCount > 0 THEN 0 ELSE 1 END, failedDocumentsCount DESC, createdAt DESC"
+            else:
+                sql_order_by = order_by(all_columns, sort)
+
+            sql = f"{select_columns(all_columns, query.get('fields'), select=query.get('select'))} FROM {table} {sql_where} {sql_order_by} LIMIT :take OFFSET :skip"
 
             if query.get("as") == "column":
                 return self.db.column(sql, params)
@@ -328,7 +335,11 @@ class GeminiDB:
                 params["q"] = f"%{query['q']}%"
 
             if sort == "uploading":
-                sql_order_by = "ORDER BY CASE WHEN uploadedAt IS NULL AND error IS NULL THEN createdAt ELSE '9999-12-31' END, uploadedAt DESC"
+                sql_order_by = f"ORDER BY CASE WHEN uploadedAt IS NULL AND error IS NULL THEN createdAt ELSE '{MAX_DATE}' END, uploadedAt DESC"
+            elif sort == "failed":
+                sql_order_by = f"ORDER BY CASE WHEN error IS NOT NULL THEN createdAt ELSE '{MIN_DATE}' END DESC, uploadedAt DESC"
+            elif sort == "issues":
+                sql_order_by = f"ORDER BY CASE WHEN state IN ('STATE_UNSPECIFIED','STATE_PENDING','MISSING_METADATA','DUPLICATE_HASH','MISSING_FROM_REMOTE','METADATA_MISMATCH') THEN uploadedAt ELSE '{MIN_DATE}' END DESC, uploadedAt DESC"
             else:
                 sql_order_by = order_by(all_columns, sort)
             
@@ -343,6 +354,29 @@ class GeminiDB:
         except Exception as e:
             self.ctx.err(f"query_documents ({take}, {skip})", e)
             return []
+
+    def query_documents_all(self, query: Dict[str, Any], user=None):
+        """Generator that yields all documents by paginating through query_documents"""
+        skip = 0
+        page_size = 1000
+        query_copy = query.copy()
+        query_copy["take"] = page_size
+
+        while True:
+            query_copy["skip"] = skip
+            docs = self.query_documents(query_copy, user=user)
+
+            if not docs:
+                break
+
+            for doc in docs:
+                yield doc
+
+            # If we got fewer than page_size, we've reached the end
+            if len(docs) < page_size:
+                break
+
+            skip += page_size
 
     def get_document(self, id, user=None):
         sql_where, params = self.get_user_filter(user, {"id": id})

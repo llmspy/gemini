@@ -305,14 +305,23 @@ def install(ctx):
         if not filestore:
             raise Exception("Filestore does not exist")
         
-        local_docs = g_db.query_documents({"filestoreId": int(id)}, user=user)
-        local_doc_names = {doc.get("name"): doc for doc in local_docs}
-        local_doc_ids = {doc.get("id"): doc for doc in local_docs}
-        local_doc_hashes = {doc.get("hash"): doc for doc in local_docs}
+        # Build hash lookup for all local documents
+        local_doc_hashes = {}
+        local_doc_names = {}
+        local_docs = []
+        for doc in g_db.query_documents_all({"filestoreId": int(id)}, user=user):
+            local_docs.append(doc)
+            local_doc_hashes[doc.get("hash")] = doc
+            local_doc_names[doc.get("name")] = doc
+
+        ctx.log(f"Found {len(local_docs)} local documents in database")
+        ctx.log(f"Local hashes available: {len(local_doc_hashes)}")
 
         local_missing = []
         remote_missing = []
         missing_metadata = []
+        metadata_mismatch = []
+        unmatched = []
         hash_counts = {}
 
         def extract_custom_metadata(doc):
@@ -328,64 +337,119 @@ def install(ctx):
 
         pager = g_client.file_search_stores.documents.list(parent=filestore.get("name"))
 
-        # Track which remote documents we've seen
-        seen_remote_names = set()
+        # Track which remote documents we've seen (by hash)
+        seen_remote_hashes = set()
+
+        # Track stats for debugging
+        matched_by_hash = 0
+        remote_docs = 0
 
         # Extract documents from the result
-        documents = []
         for doc in pager:
-            seen_remote_names.add(doc.name)
+            remote_docs += 1
+            remote_id, remote_hash = extract_custom_metadata(doc)
 
-            if doc.name not in local_doc_names:
+            # Match by hash or name
+            local_doc = local_doc_hashes.get(remote_hash) if remote_hash else local_doc_names.get(doc.name)
+            info = f"name={doc.name}, display={doc.display_name}, size={doc.size_bytes}, hash={remote_hash}"
+            doc_context = {"doc": doc, "local": local_doc}
+
+            if not local_doc:
                 local_missing.append(doc)
+                ctx.dbg(f"Remote doc not found locally: ")
                 continue
 
-            local_doc = local_doc_names[doc.name]
-            orig_state = local_doc.get("state")
-            new_state = doc.state
+            if not remote_hash or not remote_id:
+                missing_metadata.append(doc_context)
+                ctx.dbg(f"Remote doc missing metadata: {info}")
+                continue
 
-            remote_id, remote_hash = extract_custom_metadata(doc)
-            if not remote_id or not remote_hash:
-                new_state = "MISSING_METADATA"
-                missing_metadata.append({"doc": doc, "local": local_doc})
-            elif local_doc.get("id") != remote_id or local_doc.get("hash") != remote_hash:
-                # Metadata exists but doesn't match local doc
-                new_state = "METADATA_MISMATCH"
+            seen_remote_hashes.add(remote_hash)
+            matched_by_hash += 1
+
+            # Update local doc with remote name if missing
+            new_dto = {
+                "name": doc.name,
+                "displayName": doc.display_name,
+                "sizeBytes": doc.size_bytes,
+                "mimeType": doc.mime_type,
+                "createTime": doc.create_time.isoformat(" ") if doc.create_time else None,
+                "updateTime": doc.update_time.isoformat(" ") if doc.update_time else None,
+                "state": doc.state,
+                "customMetadata": json.dumps(g_db.custom_metadata_dto(doc.custom_metadata)),
+            }
+            unmatched_fields = []
+            for key, value in new_dto.items():
+                local_value = local_doc.get(key)
+                if local_value != value:
+                    unmatched_fields.append(key)
+
+            if len(unmatched_fields) > 0:
+                ctx.dbg(f"Updating local doc {local_doc.get('category')}/{local_doc.get('displayName')} unmatched fields: {unmatched_fields}")
+                unmatched.append(doc_context)
+                await g_db.update_document_async(local_doc.get("id"), new_dto,user=user)
+
+            # Verify that remote_id matches the local document id
+            if local_doc.get("id") != remote_id or local_doc.get("hash") != remote_hash:
+                # Metadata id doesn't match the document with this hash
+                ctx.dbg(f"Metadata mismatch: id={local_doc.get('id')}|{remote_id}, hash={local_doc.get('hash')}|{remote_hash}")
+                metadata_mismatch.append(doc_context)
 
             # Track hash occurrences to detect duplicates
             if remote_hash:
                 hash_counts[remote_hash] = hash_counts.get(remote_hash, 0) + 1
-                if hash_counts[remote_hash] > 1:
-                    new_state = "DUPLICATE_HASH"
-
-            # Update state if it changed
-            if new_state != orig_state:
-                await g_db.update_document_async(
-                    local_doc.get("id"),
-                    {"state": new_state},
-                    user=user
-                )
-
-            documents.append(doc_to_dto(doc))
 
         # Find local documents that don't exist in remote
-        for name, local_doc in local_doc_names.items():
-            if name and name not in seen_remote_names:
+        for local_doc in local_docs:
+            local_hash = local_doc.get("hash")
+            if local_hash and local_hash not in seen_remote_hashes:
                 remote_missing.append(local_doc)
-                # Update state to indicate it's missing from remote
-                await g_db.update_document_async(
-                    local_doc.get("id"),
-                    {"state": "MISSING_FROM_REMOTE"},
-                    user=user
-                )
+
+        total_remote = matched_by_hash + len(local_missing)
+ 
+        hashes_with_duplicates = [h for h, count in hash_counts.items() if count > 1]
+        duplicate_docs = []
+        for hash in hashes_with_duplicates:
+            doc = local_doc_hashes[hash]
+            duplicate_docs.append(doc)
+
+        for d in remote_missing:
+            g_db.update_document(d.get("id"), {"state": "MISSING_FROM_REMOTE"}, user=user)
+        for d in missing_metadata:
+            local_doc = d.get("doc")
+            g_db.update_document(local_doc.get("id"), {"state": "MISSING_METADATA"}, user=user)
+        for d in metadata_mismatch:
+            local_doc = d.get("doc")
+            g_db.update_document(local_doc.get("id"), {"state": "METADATA_MISMATCH"}, user=user)
+        for d in duplicate_docs:
+            g_db.update_document(d.get("id"), {"state": "DUPLICATE_FILE"}, user=user)
+        
+
+        ctx.log(f"Sync complete: total_remote={total_remote}, local_docs={len(local_docs)}, matched={matched_by_hash}, missing_metadata={len(missing_metadata)}, unmatched={len(local_missing)}")
+               
+        def doc_filename(doc):
+            if isinstance(doc, dict):
+                return f"{doc.get('category')}/{doc.get('displayName')}"
+            else:
+                category = None
+                for meta in doc.custom_metadata or []:
+                    if meta.key == "category" and meta.string_value:
+                        category = meta.string_value
+                        return f"{category}/{doc.display_name}"
+                return doc.display_name
 
         return web.json_response({
-            "status": "completed",
-            "documents": documents,
-            "localMissing": len(local_missing),
-            "remoteMissing": len(remote_missing),
-            "missingMetadata": len(missing_metadata),
-            "duplicateHashes": sum(1 for count in hash_counts.values() if count > 1),
+            "Missing from Local":  { "count": len(local_missing),     "docs": [doc_filename(d) for d in local_missing[:5]] },
+            "Missing from Gemini": { "count": len(remote_missing),    "docs": [doc_filename(d) for d in remote_missing[:5]] },
+            "Missing Metadata":    { "count": len(missing_metadata),  "docs": [doc_filename(d.get("doc")) for d in missing_metadata[:5]] },
+            "Metadata Mismatch":   { "count": len(metadata_mismatch), "docs": [doc_filename(d.get("doc")) for d in metadata_mismatch[:5]] },
+            "Unmatched Fields":    { "count": len(unmatched),         "docs": [doc_filename(d.get("doc")) for d in unmatched[:5]] },
+            "Duplicate Documents": { "count": len(duplicate_docs),    "docs": [doc_filename(d) for d in duplicate_docs[:5]] },
+            "Summary": {
+                "Local Documents":     len(local_docs),
+                "Remote Documents":    remote_docs,
+                "Matched Documents":   matched_by_hash,
+            }
         })
 
     ctx.add_post("filestores/{id}/sync", sync_filestore_documents)

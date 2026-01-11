@@ -113,6 +113,118 @@ function createNewChat(filestoreId, { category, document } = {}) {
     ctx.threads.startNewThread(thread)
 }
 
+const IssueCard = {
+    props: ['name', 'issue'],
+    template: `
+        <div v-if="issue?.count > 0" class="p-3 bg-gray-50 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-medium text-gray-900 dark:text-white">{{ name }}</span>
+                <span class="px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200">
+                    {{ issue.count }}
+                </span>
+            </div>
+            <div v-if="issue.docs?.length > 0" class="space-y-1">
+                <div v-for="doc in issue.docs" :key="doc" class="text-xs text-gray-600 dark:text-gray-400 font-mono truncate">
+                    {{ doc }}
+                </div>
+                <div v-if="issue.count > issue.docs.length" class="text-xs text-gray-500 italic">
+                    ... and {{ issue.count - issue.docs.length }} more
+                </div>
+            </div>
+        </div>
+    `
+}
+
+const SyncReport = {
+    components: { IssueCard },
+    props: ['syncResult', 'syncing'],
+    emits: ['sync'],
+    template: `
+        <div class="mb-8">
+            <div class="flex justify-between items-start mb-4">
+                <div>
+                   <h3 class="text-lg font-medium text-gray-900 dark:text-white">Sync Store</h3>
+                   <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Synchronize local and remote documents to detect any issues.</p>
+                </div>
+                <button type="button"
+                    @click="$emit('sync')"
+                    :disabled="syncing"
+                    class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    <span v-if="syncing">Syncing...</span>
+                    <span v-else>Sync Store</span>
+                </button>
+            </div>
+
+            <div v-if="syncResult" class="space-y-4">
+                <!-- Summary -->
+                <div class="grid grid-cols-3 gap-4">
+                    <div class="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 rounded-lg p-4 border border-blue-200 dark:border-blue-800">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-sm font-medium text-blue-600 dark:text-blue-400">Local Documents</p>
+                                <p class="text-2xl font-bold text-blue-900 dark:text-blue-100 mt-1">{{ syncResult.Summary?.['Local Documents'] || 0 }}</p>
+                            </div>
+                            <svg class="size-8" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36"><path fill="#31373d" d="M4 36s-4 0-4-4V4s0-4 4-4h26c1 0 2 1 2 1l3 3s1 1 1 2v26s0 4-4 4z"/><path fill="#55acee" d="M5 19v-1s0-2 2-2h21c2 0 2 2 2 2v1z"/><path fill="#e1e8ed" d="M5 32.021V19h25v13s0 2-2 2H7c-2 0-2-1.979-2-1.979M10 3s0-1 1-1h18c1.048 0 1 1 1 1v10s0 1-1 1H11s-1 0-1-1zm12 10h5V3h-5z"/></svg>
+                        </div>
+                    </div>
+                    <div class="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/20 dark:to-purple-800/20 rounded-lg p-4 border border-purple-200 dark:border-purple-800">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-sm font-medium text-purple-600 dark:text-purple-400">Remote Documents</p>
+                                <p class="text-2xl font-bold text-purple-900 dark:text-purple-100 mt-1">{{ syncResult.Summary?.['Remote Documents'] || 0 }}</p>
+                            </div>
+                            <svg class="text-blue-600 size-10" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5c0-2.64-2.05-4.78-4.65-4.96m-8.64 6.25a.996.996 0 0 1-1.41 0L7.2 14.2a.996.996 0 1 1 1.41-1.41L10 14.18l4.48-4.48a.996.996 0 1 1 1.41 1.41z"/></svg>
+                        </div>
+                    </div>
+                    <div class="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20 rounded-lg p-4 border border-green-200 dark:border-green-800">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-sm font-medium text-green-600 dark:text-green-400">Matched Documents</p>
+                                <p class="text-2xl font-bold text-green-900 dark:text-green-100 mt-1">{{ syncResult.Summary?.['Matched Documents'] || 0 }}</p>
+                            </div>
+                            <svg class="text-green-600 size-8" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill="currentColor" d="M10 20a10 10 0 0 1 0-20a10 10 0 1 1 0 20m-2-5l9-8.5L15.5 5L8 12L4.5 8.5L3 10z"/></svg>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Issues -->
+                <div v-if="hasIssues" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <IssueCard name="Missing from Local" :issue="syncResult['Missing from Local']" />
+                    <IssueCard name="Missing from Gemini" :issue="syncResult['Missing from Gemini']" />
+                    <IssueCard name="Missing Metadata" :issue="syncResult['Missing Metadata']" />
+                    <IssueCard name="Metadata Mismatch" :issue="syncResult['Metadata Mismatch']" />
+                    <IssueCard name="Unmatched Fields" :issue="syncResult['Unmatched Fields']" />
+                    <IssueCard name="Duplicate Documents" :issue="syncResult['Duplicate Documents']" />
+                </div>
+
+                <!-- Success Message -->
+                <div v-else class="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20 rounded-lg p-4 border border-green-200 dark:border-green-800">
+                    <p class="text-sm font-semibold text-green-900 dark:text-green-100">Perfect Sync!</p>
+                    <p class="text-xs text-green-700 dark:text-green-300 mt-1">All documents are properly synchronized.</p>
+                </div>
+            </div>
+        </div>
+    `,
+    setup(props) {
+        const hasIssues = computed(() => {
+            if (!props.syncResult) return false
+            return (
+                (props.syncResult['Missing from Local']?.count || 0) > 0 ||
+                (props.syncResult['Missing from Gemini']?.count || 0) > 0 ||
+                (props.syncResult['Missing Metadata']?.count || 0) > 0 ||
+                (props.syncResult['Metadata Mismatch']?.count || 0) > 0 ||
+                (props.syncResult['Unmatched Fields']?.count || 0) > 0 ||
+                (props.syncResult['Duplicate Documents']?.count || 0) > 0
+            )
+        })
+
+        return {
+            hasIssues
+        }
+    }
+}
+
 const FileStoreList = {
     template: `
         <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -225,6 +337,7 @@ const FileStoreList = {
 }
 
 const FileStoreDetails = {
+    components: { SyncReport },
     props: ['storeId'],
 
     template: `
@@ -288,7 +401,7 @@ const FileStoreDetails = {
                         class="bg-white dark:bg-gray-800 shadow rounded-lg px-4 py-3 flex items-start hover:bg-gray-50 dark:hover:bg-gray-700 transition border-2"
                         :class="ext.prefs.category === cat.category ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-transparent'"
                     >
-                        <span class="text-2xl mr-3">📁</span>
+                        <span class="text-2xl mr-3">{{ cat.category ? '📁' : '📄' }}</span>
                         <div class="min-w-0 flex-1 text-left">
                             <p class="text-sm font-medium text-gray-900 dark:text-white truncate"
                                :class="{'text-blue-600 dark:text-blue-400': ext.prefs.category === cat.category}">
@@ -357,7 +470,12 @@ const FileStoreDetails = {
                               </svg>
                            </div>
                            <input type="text" v-model.lazy="ext.prefs.q" placeholder="Search"
-                               class="block w-full pl-9 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md leading-5 bg-white dark:bg-gray-700 placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-gray-900 dark:text-white">
+                               class="block w-full pl-9 pr-8 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md leading-5 bg-white dark:bg-gray-700 placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-gray-900 dark:text-white">
+                           <button v-if="ext.prefs.q" @click="ext.prefs.q = ''; loadDocuments()" type="button" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                               <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                   <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+                               </svg>
+                           </button>
                        </div>
                        <select v-model="ext.prefs.sortBy" class="block rounded-md border-gray-300 dark:border-gray-600 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm dark:bg-gray-700 dark:text-white py-1.5 pl-3 pr-8">
                            <option value="-uploadedAt">Newest First</option>
@@ -368,6 +486,8 @@ const FileStoreDetails = {
                            <option value="createdAt">Created (Oldest)</option>
                            <option value="-size">Size (Largest)</option>
                            <option value="size">Size (Smallest)</option>
+                           <option value="issues">Sync Issues</option>
+                           <option value="failed">Failed</option>
                            <option value="uploading">Uploading</option>
                        </select>
                    </div>
@@ -411,7 +531,7 @@ const FileStoreDetails = {
                                     <svg class="size-5 animate-spin" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2A10 10 0 1 0 22 12A10 10 0 0 0 12 2Zm0 18a8 8 0 1 1 8-8A8 8 0 0 1 12 20Z" opacity=".5"/><path fill="currentColor" d="M20 12h2A10 10 0 0 0 12 2V4A8 8 0 0 1 20 12Z"/></svg>
                                 </span>
                                 <!-- Show re-upload button only if document has been uploaded -->
-                                <button v-else-if="doc.uploadedAt" type="button" @click.stop="reuploadDocument(doc)" :disabled="reuploadingDocs.has(doc.id)" class="p-1 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" title="Re-upload document to Gemini">
+                                <button v-else-if="doc.uploadedAt || doc.error" type="button" @click.stop="reuploadDocument(doc)" :disabled="reuploadingDocs.has(doc.id)" class="p-1 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" title="Re-upload document to Gemini">
                                     <svg v-if="!reuploadingDocs.has(doc.id)" class="size-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path fill="currentColor" d="m346.231 284.746l-90.192-90.192l-90.192 90.192l22.627 22.627l51.565-51.565V496h32V255.808l51.565 51.565z"/><path fill="currentColor" d="M400 161.453V160c0-79.4-64.6-144-144-144S112 80.6 112 160v2.491A122.3 122.3 0 0 0 49.206 195.2A109.4 109.4 0 0 0 16 273.619c0 31.119 12.788 60.762 36.01 83.469C74.7 379.275 105.338 392 136.07 392H200v-32h-63.93C89.154 360 48 319.635 48 273.619c0-42.268 35.64-77.916 81.137-81.155L144 191.405V160a112 112 0 0 1 224 0v32.04l15.8.2c46.472.588 80.2 34.813 80.2 81.379C464 322.057 428.346 360 382.83 360H312v32h70.83a109.75 109.75 0 0 0 81.14-35.454c20.655-22.207 32.03-51.657 32.03-82.927c0-58.437-40.284-104.227-96-112.166"/></svg>
                                     <svg v-else class="size-5 animate-spin" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2A10 10 0 1 0 22 12A10 10 0 0 0 12 2Zm0 18a8 8 0 1 1 8-8A8 8 0 0 1 12 20Z" opacity=".5"/><path fill="currentColor" d="M20 12h2A10 10 0 0 0 12 2V4A8 8 0 0 1 20 12Z"/></svg>
                                 </button>
@@ -420,7 +540,9 @@ const FileStoreDetails = {
                                 </span>
                                 <span v-else-if="doc.state === 'STATE_ACTIVE'" class="text-green-600" title="Active">
                                     <svg class="size-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 21a9 9 0 1 0 0-18a9 9 0 0 0 0 18m-.232-5.36l5-6l-1.536-1.28l-4.3 5.159l-2.225-2.226l-1.414 1.414l3 3l.774.774z" clip-rule="evenodd"/></svg>
-                                </span>
+                                </span>                                
+                                <span v-else-if="doc.state && ['STATE_UNSPECIFIED','STATE_PENDING'].includes(doc.state)" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200">{{ doc.state }}</span>
+                                <span v-else-if="doc.state && ['MISSING_METADATA','DUPLICATE_FILE','MISSING_FROM_REMOTE','METADATA_MISMATCH'].includes(doc.state)" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ doc.state }}</span>
                                 <span v-else-if="doc.state" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ doc.state }}</span>
                                 <span @click.prevent.stop="createNewChat(storeId, { document: doc })"
                                     class="cursor-pointer text-2xl text-gray-600" :title="'Ask Gemini RAG about ' + doc.displayName">
@@ -436,48 +558,7 @@ const FileStoreDetails = {
 
             </div>
 
-            <div class="mb-8 flex justify-between items-center dark:border-gray-700">
-                <div>
-                   <h3 class="text-lg font-medium text-gray-900 dark:text-white">Sync Store</h3>
-                   <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Synchronize local and remote documents to detect any issues.</p>
-                   <div v-if="syncResult" class="mt-3 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-                       <div class="grid grid-cols-2 gap-3 text-sm">
-                           <div>
-                               <span class="font-medium text-gray-700 dark:text-gray-300">Status:</span>
-                               <span class="ml-2 text-gray-900 dark:text-white">{{ syncResult.status }}</span>
-                           </div>
-                           <div>
-                               <span class="font-medium text-gray-700 dark:text-gray-300">Documents:</span>
-                               <span class="ml-2 text-gray-900 dark:text-white">{{ syncResult.documents?.length || 0 }}</span>
-                           </div>
-                           <div v-if="syncResult.localMissing > 0" class="text-orange-600 dark:text-orange-400">
-                               <span class="font-medium">Local Missing:</span>
-                               <span class="ml-2">{{ syncResult.localMissing }}</span>
-                           </div>
-                           <div v-if="syncResult.remoteMissing > 0" class="text-orange-600 dark:text-orange-400">
-                               <span class="font-medium">Remote Missing:</span>
-                               <span class="ml-2">{{ syncResult.remoteMissing }}</span>
-                           </div>
-                           <div v-if="syncResult.missingMetadata > 0" class="text-orange-600 dark:text-orange-400">
-                               <span class="font-medium">Missing Metadata:</span>
-                               <span class="ml-2">{{ syncResult.missingMetadata }}</span>
-                           </div>
-                           <div v-if="syncResult.duplicateHashes > 0" class="text-orange-600 dark:text-orange-400">
-                               <span class="font-medium">Duplicate Hashes:</span>
-                               <span class="ml-2">{{ syncResult.duplicateHashes }}</span>
-                           </div>
-                       </div>
-                   </div>
-                </div>
-                <button type="button"
-                    @click="syncStore"
-                    :disabled="syncing"
-                    class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                    <span v-if="syncing">Syncing...</span>
-                    <span v-else>Sync Store</span>
-                </button>
-            </div>
+            <SyncReport :syncResult="syncResult" :syncing="syncing" @sync="syncStore" />
 
             <div class="flex justify-between items-center dark:border-gray-700">
                 <div>
@@ -786,6 +867,9 @@ const FileStoreDetails = {
                     await refresh()
                 }
             } finally {
+                ext.setPrefs({
+                    sortBy: 'issues'
+                })
                 syncing.value = false
             }
         }
@@ -803,6 +887,7 @@ const FileStoreDetails = {
             syncStore,
             syncing,
             syncResult,
+            SyncReport,
             loading,
             fileInput,
             handleFileUpload,

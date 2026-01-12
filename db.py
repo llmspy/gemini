@@ -4,8 +4,9 @@ from typing import Any, Dict
 
 from llms.db import DbManager, order_by, select_columns, to_dto, valid_columns
 
-MIN_DATE = '0000-01-01'
-MAX_DATE = '9999-12-31'
+MIN_DATE = "0000-01-01"
+MAX_DATE = "9999-12-31"
+
 
 def with_user(data, user):
     if user is None:
@@ -337,12 +338,13 @@ class GeminiDB:
             if sort == "uploading":
                 sql_order_by = f"ORDER BY CASE WHEN uploadedAt IS NULL AND error IS NULL THEN createdAt ELSE '{MAX_DATE}' END, uploadedAt DESC"
             elif sort == "failed":
-                sql_order_by = f"ORDER BY CASE WHEN error IS NOT NULL THEN createdAt ELSE '{MIN_DATE}' END DESC, uploadedAt DESC"
+                sql_order_by = (
+                    f"ORDER BY CASE WHEN error IS NOT NULL THEN createdAt ELSE '{MIN_DATE}' END DESC, uploadedAt DESC"
+                )
             elif sort == "issues":
                 sql_order_by = f"ORDER BY CASE WHEN state IN ('STATE_UNSPECIFIED','STATE_PENDING','MISSING_METADATA','DUPLICATE_HASH','MISSING_FROM_REMOTE','METADATA_MISMATCH') THEN uploadedAt ELSE '{MIN_DATE}' END DESC, uploadedAt DESC"
             else:
                 sql_order_by = order_by(all_columns, sort)
-            
 
             sql = f"{select_columns(all_columns, query.get('fields'), select=query.get('select'))} FROM {table} {sql_where} {sql_order_by} LIMIT :take OFFSET :skip"
 
@@ -369,8 +371,7 @@ class GeminiDB:
             if not docs:
                 break
 
-            for doc in docs:
-                yield doc
+            yield from docs
 
             # If we got fewer than page_size, we've reached the end
             if len(docs) < page_size:

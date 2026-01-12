@@ -454,5 +454,11 @@ def install(ctx):
 
     ctx.add_post("filestores/{id}/sync", sync_filestore_documents)
 
+    # Start the upload worker to check for pending uploads
+    try:
+        g_worker.start()
+    except Exception as e:
+        ctx.err("Failed to start UploadWorker", e)
+
 
 __install__ = install

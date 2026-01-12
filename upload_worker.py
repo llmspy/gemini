@@ -8,6 +8,8 @@ from google import genai
 
 from .db import GeminiDB
 
+GEMINI_UPLOAD_MIME_TYPES = os.getenv("GEMINI_UPLOAD_MIME_TYPES", 
+    "mdx:text/markdown,l:text/markdown,ss:text/markdown,sc:text/markdown")
 
 class UploadWorker:
     def __init__(self, ctx, db: GeminiDB, client: genai.Client):
@@ -18,6 +20,15 @@ class UploadWorker:
             db.clone()
         )  # can't share pooled read connections across multiple threads
         self.client = client
+
+        self.include_mime_types = {}
+        if GEMINI_UPLOAD_MIME_TYPES:
+            for ext_type in GEMINI_UPLOAD_MIME_TYPES.split(","):
+                ext_type = ext_type.strip()
+                if not ext_type:
+                    continue
+                ext, mime_type = ext_type.split(":")
+                self.include_mime_types[ext] = mime_type
 
     def start(self):
         with self.lock:
@@ -127,6 +138,11 @@ class UploadWorker:
                 # fails with mime_type application/json, uploading .json succeeds without it
                 # "mime_type": doc.get("mimeType"),
             }
+
+            ext = os.path.splitext(full_path)[1].lstrip(".").lower()
+            if ext in self.include_mime_types:
+                config["mime_type"] = self.include_mime_types[ext]
+
             if self.ctx.debug:
                 self.ctx.dbg(
                     f"Uploading {doc.get('displayName')} to {store_name}\n"

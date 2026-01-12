@@ -437,6 +437,7 @@ class GeminiDB:
 
     def document_categories(self, id, user=None):
         sql_where, params = self.get_user_filter(user, {"id": id})
+        sql_where += " AND filestoreId = :id"
         return self.db.all(
             f"SELECT IFNULL(category, '') AS category, COUNT(*) as count, SUM(size) AS size FROM document {sql_where} GROUP BY category ORDER BY category",
             params,

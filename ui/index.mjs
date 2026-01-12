@@ -739,24 +739,26 @@ const FileStoreDetails = {
                 }
 
                 const res = await ext.postForm(url, { body: formData })
-                if (!res.ok) throw new Error(res.statusText)
-                await res.json()
+                const api = await ext.createJsonResult(res)
+                if (api.error) {
+                    ctx.setError(api.error)
+                } else {
+                    // If a new category was created via upload, clear the input and select it
+                    if (newCategoryName.value.trim()) {
+                        newCategoryName.value = ''
+                    }
 
-                // If a new category was created via upload, clear the input and select it
-                if (newCategoryName.value.trim()) {
-                    newCategoryName.value = ''
+                    if (categoryToUse != ext.prefs.category) {
+                        selectCategory(categoryToUse)
+                    }
+
+                    // Switch to "uploading" sort to show upload progress
+                    ext.setPrefs({ sortBy: 'uploading' })
+
+                    await loadFilestores()
+                    loadDocuments() // Refresh the main list and start polling
+                    refresh() // Refresh categories
                 }
-
-                if (categoryToUse != ext.prefs.category) {
-                    selectCategory(categoryToUse)
-                }
-
-                // Switch to "uploading" sort to show upload progress
-                ext.setPrefs({ sortBy: 'uploading' })
-
-                await loadFilestores()
-                loadDocuments() // Refresh the main list and start polling
-                refresh() // Refresh categories
             } catch (e) {
                 console.error("Upload failed", e)
                 alert("Upload failed: " + (e.message || "Unknown error"))

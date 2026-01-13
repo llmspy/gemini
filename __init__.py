@@ -62,7 +62,6 @@ def install(ctx):
         display_name = filestore.get("displayName")
         if not display_name:
             raise Exception("displayName is required")
-        id = await g_db.create_filestore_async(filestore, user=user)
 
         ctx.dbg(f"Creating filestore {display_name} in Gemini...")
         result = g_client.file_search_stores.create(config={"display_name": display_name})

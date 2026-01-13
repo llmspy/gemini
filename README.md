@@ -183,31 +183,31 @@ Manually retry uploading a failed document. Waits for upload to complete and ret
 
 ### Creating a Filestore
 ```bash
-curl -X POST http://localhost:8080/filestores \
+curl -X POST http://localhost:8080/ext/gemini/filestores \
   -H "Content-Type: application/json" \
   -d '{"displayName": "Technical Documentation"}'
 ```
 
 ### Uploading Documents with Categories
 ```bash
-curl -X POST http://localhost:8080/filestores/1/upload?category=guides \
+curl -X POST http://localhost:8080/ext/gemini/filestores/1/upload?category=guides \
   -F "file=@guide1.pdf" \
   -F "file=@guide2.pdf"
 ```
 
 ### Syncing Documents
 ```bash
-curl -X POST http://localhost:8080/filestores/1/sync
+curl -X POST http://localhost:8080/ext/gemini/filestores/1/sync
 ```
 
 ### Querying Failed Uploads
 ```bash
-curl "http://localhost:8080/documents?sort=failed&not_null=error"
+curl "http://localhost:8080/ext/gemini/documents?sort=failed&not_null=error"
 ```
 
 ### Querying by Category
 ```bash
-curl "http://localhost:8080/documents?filestoreId=1&category=guides&sort=-id&take=20"
+curl "http://localhost:8080/ext/gemini/documents?filestoreId=1&category=guides&sort=-id&take=20"
 ```
 
 ## How It Works
@@ -328,22 +328,22 @@ UploadWorker stopped
 
 ### View Pending Uploads
 ```bash
-curl "http://localhost:8080/documents?sort=uploading&null=uploadedAt,error"
+curl "http://localhost:8080/ext/gemini/documents?sort=uploading&null=uploadedAt,error"
 ```
 
 ### View Failed Uploads
 ```bash
-curl "http://localhost:8080/documents?sort=failed&not_null=error"
+curl "http://localhost:8080/ext/gemini/documents?sort=failed&not_null=error"
 ```
 
 ### Retry Failed Upload
 ```bash
-curl -X POST http://localhost:8080/documents/{id}/upload
+curl -X POST http://localhost:8080/ext/gemini/documents/{id}/upload
 ```
 
 ### Check Sync Status
 ```bash
-curl -X POST http://localhost:8080/filestores/{id}/sync
+curl -X POST http://localhost:8080/ext/gemini/filestores/{id}/sync
 ```
 
 ### Enable Debug Logging

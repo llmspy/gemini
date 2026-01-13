@@ -240,6 +240,7 @@ const FileStoreList = {
 
             <div v-if="showCreate" class="mb-8 bg-gray-50 dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700">
                 <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Create New Store</h3>
+                <p v-if="loading" class="mb-4 text-sm text-gray-500 dark:text-gray-400">Please wait, this may take a while.</p>
                 <form @submit.prevent="createStore" class="flex gap-4">
                     <div class="flex-grow">
                         <label for="storeName" class="sr-only">Store Name</label>

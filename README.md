@@ -55,7 +55,7 @@ GEMINI_API_KEY=your_api_key_here
 ```bash
 # Override MIME types for specific file extensions (comma-separated)
 # Format: extension:mime/type,extension:mime/type
-GEMINI_UPLOAD_MIME_TYPES="mdx:text/markdown,l:text/markdown,ss:text/markdown,sc:text/markdown"
+GEMINI_UPLOAD_MIME_TYPES="mdx:text/markdown,ss:text/markdown"
 ```
 
 ### Database Storage
@@ -348,6 +348,11 @@ curl -X POST http://localhost:8080/ext/gemini/filestores/{id}/sync
 
 ### Enable Debug Logging
 Set the debug flag in your context to see detailed operation logs including:
+
+```bash
+DEBUG=1 ./llms.sh --serve 8000 --verbose
+```
+
 - Gemini API requests and responses
 - Document matching logic
 - Metadata updates
@@ -365,4 +370,4 @@ Once documents are uploaded, they can be referenced in Gemini chat sessions usin
 
 ## License
 
-This extension is part of the llms.py ecosystem.
+This extension is released under the [New BSD License](https://github.com/ServiceStack/llms/blob/main/LICENSE).

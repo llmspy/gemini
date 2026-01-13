@@ -9,7 +9,7 @@ from google import genai
 from .db import GeminiDB
 
 GEMINI_UPLOAD_MIME_TYPES = os.getenv("GEMINI_UPLOAD_MIME_TYPES", 
-    "mdx:text/markdown,l:text/markdown,ss:text/markdown,sc:text/markdown")
+    "mdx:text/markdown,cshtml:text/html")
 
 class UploadWorker:
     def __init__(self, ctx, db: GeminiDB, client: genai.Client):

@@ -97,8 +97,10 @@ def install(ctx):
             raise Exception("Filestore does not exist")
 
         name = row.get("name")
+        ctx.dbg(f"Deleting filestore {name} in Gemini...")
         g_client.file_search_stores.delete(name=name, config={"force": True})
 
+        ctx.dbg(f"Filestore {name} deleted in Gemini, removing local record...")
         g_db.delete_filestore(id, user=user)
         return web.json_response({})
 
@@ -284,7 +286,7 @@ def install(ctx):
                 g_client.file_search_stores.documents.delete(name=doc.get("name"), config={"force": True})
             except Exception as e:
                 ctx.err(f"Could not delete document {doc.get('name')}", e)
-        
+
         await g_db.update_document_async(id, {"error": None, "uploadedAt": None}, user=user)
         g_worker.start()
         while g_worker.running:
@@ -292,10 +294,9 @@ def install(ctx):
             doc = g_db.get_document(id, user=user)
             if doc.get("uploadedAt") or doc.get("error"):
                 return web.json_response(document_dto(doc))
-        
+
         return web.json_response(document_dto(doc))
-            
-    
+
     ctx.add_post("documents/{id}/upload", upload_document)
 
     async def sync_filestore_documents(request):
@@ -304,7 +305,7 @@ def install(ctx):
         filestore = g_db.get_filestore(int(id), user=user)
         if not filestore:
             raise Exception("Filestore does not exist")
-        
+
         # Build hash lookup for all local documents
         local_doc_hashes = {}
         local_doc_names = {}
@@ -385,14 +386,18 @@ def install(ctx):
                     unmatched_fields.append(key)
 
             if len(unmatched_fields) > 0:
-                ctx.dbg(f"Updating local doc {local_doc.get('category')}/{local_doc.get('displayName')} unmatched fields: {unmatched_fields}")
+                ctx.dbg(
+                    f"Updating local doc {local_doc.get('category')}/{local_doc.get('displayName')} unmatched fields: {unmatched_fields}"
+                )
                 unmatched.append(doc_context)
-                await g_db.update_document_async(local_doc.get("id"), new_dto,user=user)
+                await g_db.update_document_async(local_doc.get("id"), new_dto, user=user)
 
             # Verify that remote_id matches the local document id
             if local_doc.get("id") != remote_id or local_doc.get("hash") != remote_hash:
                 # Metadata id doesn't match the document with this hash
-                ctx.dbg(f"Metadata mismatch: id={local_doc.get('id')}|{remote_id}, hash={local_doc.get('hash')}|{remote_hash}")
+                ctx.dbg(
+                    f"Metadata mismatch: id={local_doc.get('id')}|{remote_id}, hash={local_doc.get('hash')}|{remote_hash}"
+                )
                 metadata_mismatch.append(doc_context)
 
             # Track hash occurrences to detect duplicates
@@ -406,7 +411,7 @@ def install(ctx):
                 remote_missing.append(local_doc)
 
         total_remote = matched_by_hash + len(local_missing)
- 
+
         hashes_with_duplicates = [h for h, count in hash_counts.items() if count > 1]
         duplicate_docs = []
         for hash in hashes_with_duplicates:
@@ -423,10 +428,11 @@ def install(ctx):
             g_db.update_document(local_doc.get("id"), {"state": "METADATA_MISMATCH"}, user=user)
         for d in duplicate_docs:
             g_db.update_document(d.get("id"), {"state": "DUPLICATE_FILE"}, user=user)
-        
 
-        ctx.log(f"Sync complete: total_remote={total_remote}, local_docs={len(local_docs)}, matched={matched_by_hash}, missing_metadata={len(missing_metadata)}, unmatched={len(local_missing)}")
-               
+        ctx.log(
+            f"Sync complete: total_remote={total_remote}, local_docs={len(local_docs)}, matched={matched_by_hash}, missing_metadata={len(missing_metadata)}, unmatched={len(local_missing)}"
+        )
+
         def doc_filename(doc):
             if isinstance(doc, dict):
                 return f"{doc.get('category')}/{doc.get('displayName')}"
@@ -438,19 +444,39 @@ def install(ctx):
                         return f"{category}/{doc.display_name}"
                 return doc.display_name
 
-        return web.json_response({
-            "Missing from Local":  { "count": len(local_missing),     "docs": [doc_filename(d) for d in local_missing[:5]] },
-            "Missing from Gemini": { "count": len(remote_missing),    "docs": [doc_filename(d) for d in remote_missing[:5]] },
-            "Missing Metadata":    { "count": len(missing_metadata),  "docs": [doc_filename(d.get("doc")) for d in missing_metadata[:5]] },
-            "Metadata Mismatch":   { "count": len(metadata_mismatch), "docs": [doc_filename(d.get("doc")) for d in metadata_mismatch[:5]] },
-            "Unmatched Fields":    { "count": len(unmatched),         "docs": [doc_filename(d.get("doc")) for d in unmatched[:5]] },
-            "Duplicate Documents": { "count": len(duplicate_docs),    "docs": [doc_filename(d) for d in duplicate_docs[:5]] },
-            "Summary": {
-                "Local Documents":     len(local_docs),
-                "Remote Documents":    remote_docs,
-                "Matched Documents":   matched_by_hash,
+        return web.json_response(
+            {
+                "Missing from Local": {
+                    "count": len(local_missing),
+                    "docs": [doc_filename(d) for d in local_missing[:5]],
+                },
+                "Missing from Gemini": {
+                    "count": len(remote_missing),
+                    "docs": [doc_filename(d) for d in remote_missing[:5]],
+                },
+                "Missing Metadata": {
+                    "count": len(missing_metadata),
+                    "docs": [doc_filename(d.get("doc")) for d in missing_metadata[:5]],
+                },
+                "Metadata Mismatch": {
+                    "count": len(metadata_mismatch),
+                    "docs": [doc_filename(d.get("doc")) for d in metadata_mismatch[:5]],
+                },
+                "Unmatched Fields": {
+                    "count": len(unmatched),
+                    "docs": [doc_filename(d.get("doc")) for d in unmatched[:5]],
+                },
+                "Duplicate Documents": {
+                    "count": len(duplicate_docs),
+                    "docs": [doc_filename(d) for d in duplicate_docs[:5]],
+                },
+                "Summary": {
+                    "Local Documents": len(local_docs),
+                    "Remote Documents": remote_docs,
+                    "Matched Documents": matched_by_hash,
+                },
             }
-        })
+        )
 
     ctx.add_post("filestores/{id}/sync", sync_filestore_documents)
 

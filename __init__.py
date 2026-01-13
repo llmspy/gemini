@@ -63,27 +63,25 @@ def install(ctx):
         if not display_name:
             raise Exception("displayName is required")
         id = await g_db.create_filestore_async(filestore, user=user)
-        row = g_db.get_filestore(id, user=user)
-        try:
-            result = g_client.file_search_stores.create(config={"display_name": display_name})
-            ctx.dbg("g_client.file_search_stores.create")
-            ctx.dbg(result or None)
-            if result:
-                await g_db.update_filestore_async(
-                    id,
-                    {
-                        "name": result.name,
-                        "displayName": result.display_name,
-                        "createTime": result.create_time,
-                        "updateTime": result.update_time,
-                        "activeDocumentsCount": result.active_documents_count,
-                        "pendingDocumentsCount": result.pending_documents_count,
-                        "failedDocumentsCount": result.failed_documents_count,
-                        "sizeBytes": result.size_bytes,
-                    },
-                )
-        except Exception as e:
-            await g_db.update_filestore(id, {"error": ctx.error_message(e)}, user=user)
+
+        ctx.dbg(f"Creating filestore {display_name} in Gemini...")
+        result = g_client.file_search_stores.create(config={"display_name": display_name})
+        ctx.dbg(result or None)
+        if result:
+            filestore.update({
+                "name": result.name,
+                "displayName": result.display_name,
+                "createTime": result.create_time,
+                "updateTime": result.update_time,
+                "activeDocumentsCount": result.active_documents_count,
+                "pendingDocumentsCount": result.pending_documents_count,
+                "failedDocumentsCount": result.failed_documents_count,
+                "sizeBytes": result.size_bytes,
+            })
+            id = await g_db.create_filestore_async(filestore, user=user)
+            row = g_db.get_filestore(id, user=user)
+        else:
+            raise Exception("Failed to create filestore in Gemini")
 
         return web.json_response(filestore_dto(row) if row else "")
 

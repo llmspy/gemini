@@ -97,8 +97,11 @@ def install(ctx):
             raise Exception("Filestore does not exist")
 
         name = row.get("name")
-        ctx.dbg(f"Deleting filestore {name} in Gemini...")
-        g_client.file_search_stores.delete(name=name, config={"force": True})
+        if name:
+            ctx.dbg(f"Deleting filestore {name} in Gemini...")
+            g_client.file_search_stores.delete(name=name, config={"force": True})
+        else:
+            ctx.dbg(f"Filestore {id} has no name, skipping Gemini deletion...")
 
         ctx.dbg(f"Filestore {name} deleted in Gemini, removing local record...")
         g_db.delete_filestore(id, user=user)

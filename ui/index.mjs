@@ -304,6 +304,10 @@ const FileStoreList = {
         const newStoreName = ref('')
         const loading = ref(false)
 
+        onMounted(() => {
+            loadFilestores()
+        })
+
         async function createStore() {
             if (!newStoreName.value.trim()) return
             loading.value = true

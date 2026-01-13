@@ -424,7 +424,7 @@ const FileStoreDetails = {
             <div class="mb-4 flex justify-between items-center gap-4">
                 <h3 class="text-lg font-medium text-gray-900 dark:text-white flex items-center space-x-1">
                     <span>Documents</span>
-                    <span v-if="ext.prefs.category !== null" class="text-base font-normal text-gray-500 dark:text-gray-400">
+                    <span v-if="ext.prefs.category != null" class="text-base font-normal text-gray-500 dark:text-gray-400">
                         in {{ ext.prefs.category === '' ? 'Uncategorized' : ext.prefs.category }}
                     </span>
                 </h3>
@@ -450,7 +450,7 @@ const FileStoreDetails = {
                 :class="{'border-blue-500 bg-blue-50 dark:bg-blue-900/20': dragover}"
                 class="group relative transition-colors duration-200 text-center py-12 bg-gray-50 dark:bg-gray-800/50 rounded-lg border-2 border-dashed border-gray-300 dark:border-gray-700 mb-4 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800">
                 <div class="mx-auto h-12 w-12 text-gray-400 text-5xl mb-4">📄</div>
-                 <div v-if="(ext.prefs.category !== null && ext.prefs.category !== '') || newCategoryName" class="mb-3 flex items-center justify-center gap-1">
+                 <div v-if="(ext.prefs.category != null && ext.prefs.category !== '') || newCategoryName" class="mb-3 flex items-center justify-center gap-1">
                     📁
                     <span class="font-medium text-gray-900 dark:text-white">{{ newCategoryName || ext.prefs.category }}</span>
                  </div>
@@ -636,7 +636,7 @@ const FileStoreDetails = {
                     sort: ext.prefs.sortBy || '-uploadedAt',
                 })
                 if (ext.prefs.q) params.append('q', ext.prefs.q)
-                if (ext.prefs.category !== null) {
+                if (ext.prefs.category != null) {
                     if (ext.prefs.category === '') {
                         params.append('null', 'category')
                     } else {
@@ -747,7 +747,7 @@ const FileStoreDetails = {
                 // Use newCategoryName if being typed, otherwise use ext.prefs.category
                 const categoryToUse = newCategoryName.value.trim() || ext.prefs.category
 
-                if (categoryToUse !== null && categoryToUse !== '') {
+                if (categoryToUse != null && categoryToUse !== '') {
                     url += `?category=${encodeURIComponent(categoryToUse)}`
                 }
 

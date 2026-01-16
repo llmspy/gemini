@@ -31,12 +31,6 @@ Features include background processing, SHA-256 deduplication, state tracking, a
 - **Markdown Extensions**: Pre-configured support for mdx, l, ss, sc extensions as text/markdown
 - **Upload Optimization**: Ensures correct MIME types for better search indexing
 
-### Robust Error Handling
-- **Comprehensive Logging**: Track all operations with detailed debug information
-- **Error Recovery**: Gracefully handle failures and store error messages for review
-- **Retry Capability**: Manual retry endpoint for failed uploads
-- **ClientError Handling**: Proper handling of 404s and other Gemini API errors
-
 ## Configuration
 
 ### Environment Variables

@@ -8,17 +8,15 @@ from google import genai
 
 from .db import GeminiDB
 
-GEMINI_UPLOAD_MIME_TYPES = os.getenv("GEMINI_UPLOAD_MIME_TYPES", 
-    "mdx:text/markdown,cshtml:text/html")
+GEMINI_UPLOAD_MIME_TYPES = os.getenv("GEMINI_UPLOAD_MIME_TYPES", "mdx:text/markdown,cshtml:text/html")
+
 
 class UploadWorker:
     def __init__(self, ctx, db: GeminiDB, client: genai.Client):
         self.ctx = ctx
         self.running = False
         self.lock = threading.Lock()
-        self.db = (
-            db.clone()
-        )  # can't share pooled read connections across multiple threads
+        self.db = db.clone()  # can't share pooled read connections across multiple threads
         self.client = client
 
         self.include_mime_types = {}
@@ -67,9 +65,7 @@ class UploadWorker:
             for filestore_id in filestore_ids:
                 filestore = self.db.get_filestore(filestore_id)
                 if filestore:
-                    result = self.client.file_search_stores.get(
-                        name=filestore.get("name")
-                    )
+                    result = self.client.file_search_stores.get(name=filestore.get("name"))
                     if result:
                         self.db.update_filestore(
                             filestore.get("id"),
@@ -102,6 +98,9 @@ class UploadWorker:
 
             filestore = db.get_filestore(filestore_id, user=user)
             if not filestore:
+                # Fallback to public filestore (user IS NULL) if user-specific not found
+                filestore = db.get_filestore(filestore_id, user=None)
+            if not filestore:
                 raise Exception("Filestore not found")
 
             store_name = filestore.get("name")
@@ -128,9 +127,7 @@ class UploadWorker:
                 {"key": "hash", "string_value": doc.get("hash")},
             ]
             if doc.get("category"):
-                custom_metadata.append(
-                    {"key": "category", "string_value": doc.get("category")}
-                )
+                custom_metadata.append({"key": "category", "string_value": doc.get("category")})
 
             config = {
                 "display_name": doc.get("displayName"),
@@ -144,10 +141,7 @@ class UploadWorker:
                 config["mime_type"] = self.include_mime_types[ext]
 
             if self.ctx.debug:
-                self.ctx.dbg(
-                    f"Uploading {doc.get('displayName')} to {store_name}\n"
-                    + json.dumps(config, indent=2)
-                )
+                self.ctx.dbg(f"Uploading {doc.get('displayName')} to {store_name}\n" + json.dumps(config, indent=2))
 
             operation = self.client.file_search_stores.upload_to_file_search_store(
                 file_search_store_name=store_name,
@@ -189,6 +183,4 @@ class UploadWorker:
         except Exception as e:
             self.ctx.err(f"Failed to upload doc {doc.get('id')}", e)
             if doc_id:
-                db.update_document(
-                    doc_id, {"error": self.ctx.error_message(e)}, user=user
-                )
+                db.update_document(doc_id, {"error": self.ctx.error_message(e)}, user=user)

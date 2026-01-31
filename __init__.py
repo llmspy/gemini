@@ -67,16 +67,18 @@ def install(ctx):
         result = g_client.file_search_stores.create(config={"display_name": display_name})
         ctx.dbg(result or None)
         if result:
-            filestore.update({
-                "name": result.name,
-                "displayName": result.display_name,
-                "createTime": result.create_time,
-                "updateTime": result.update_time,
-                "activeDocumentsCount": result.active_documents_count,
-                "pendingDocumentsCount": result.pending_documents_count,
-                "failedDocumentsCount": result.failed_documents_count,
-                "sizeBytes": result.size_bytes,
-            })
+            filestore.update(
+                {
+                    "name": result.name,
+                    "displayName": result.display_name,
+                    "createTime": result.create_time,
+                    "updateTime": result.update_time,
+                    "activeDocumentsCount": result.active_documents_count,
+                    "pendingDocumentsCount": result.pending_documents_count,
+                    "failedDocumentsCount": result.failed_documents_count,
+                    "sizeBytes": result.size_bytes,
+                }
+            )
             id = await g_db.create_filestore_async(filestore, user=user)
             row = g_db.get_filestore(id, user=user)
         else:

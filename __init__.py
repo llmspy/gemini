@@ -109,9 +109,9 @@ def install(ctx):
     ctx.add_delete("filestores/{id}", delete_filestore)
 
     async def upload_to_filestore(request):
-        ctx.log("upload_to_filestore")
         user = ctx.get_username(request)
         id = request.match_info["id"]
+        ctx.log(f"upload_to_filestore {id} {user if user else ''}")
         category = request.query.get("category")
 
         filestore = g_db.get_filestore(id, user=user)
@@ -185,7 +185,6 @@ def install(ctx):
 
             task = g_db.create_document_async(
                 {
-                    "user": user,
                     "filename": save_filename,
                     "url": url,
                     "hash": sha256_hash,
@@ -194,7 +193,8 @@ def install(ctx):
                     "mimeType": mimetype,
                     "filestoreId": int(id),
                     "category": category,
-                }
+                },
+                user=user,
             )
             tasks.append(asyncio.create_task(task))
 

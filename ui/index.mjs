@@ -59,7 +59,7 @@ function createNewChat(filestoreId, { category, document } = {}) {
     console.log('createNewChat', category, document)
     const model = getGeminiModel()
     if (!model) {
-        ctx.setError({ message:'No Gemini model available.' })
+        ctx.setError({ message: 'No Gemini model available.' })
         return
     }
 
@@ -149,7 +149,7 @@ const SyncReport = {
                 <button type="button"
                     @click="$emit('sync')"
                     :disabled="syncing"
-                    class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium" :class="[$styles.primaryButton]"
                 >
                     <span v-if="syncing">Syncing...</span>
                     <span v-else>Sync Store</span>
@@ -230,10 +230,10 @@ const FileStoreList = {
         <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <div class="flex justify-between items-center mb-8">
                 <div>
-                   <h1 class="text-2xl font-bold text-gray-900 dark:text-white">File Stores</h1>
-                   <p class="text-sm text-gray-500 dark:text-gray-400">Manage your file stores for Gemini search grounding</p>
+                   <h1 class="text-2xl font-bold" :class="[$styles.heading]">File Stores</h1>
+                   <p class="text-sm" :class="[$styles.muted]">Manage your file stores for Gemini search grounding</p>
                 </div>
-                <button type="button" @click="showCreate = true" class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                <button type="button" @click="showCreate = true" class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium" :class="[$styles.primaryButton]">
                     New Store
                 </button>
             </div>
@@ -241,16 +241,16 @@ const FileStoreList = {
             <div v-if="showCreate" class="mb-8 bg-gray-50 dark:bg-gray-800 rounded-lg p-6 border border-gray-200 dark:border-gray-700">
                 <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Create New Store</h3>
                 <p v-if="loading" class="mb-4 text-sm text-gray-500 dark:text-gray-400">Please wait, this may take a while.</p>
-                <form @submit.prevent="createStore" class="flex gap-4">
+                <form @submit.prevent="createStore" class="flex gap-2">
                     <div class="flex-grow">
                         <label for="storeName" class="sr-only">Store Name</label>
                         <input type="text" id="storeName" v-model="newStoreName" placeholder="e.g. Project Documentation" class="block w-full rounded-md border-gray-300 dark:border-gray-600 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm dark:bg-gray-700 dark:text-white p-2">
                     </div>
-                    <button type="submit" :disabled="loading || !newStoreName.trim()" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50">
+                    <button type="submit" :disabled="loading || !newStoreName.trim()" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium" :class="[$styles.primaryButton]">
                         <span v-if="loading">Creating...</span>
                         <span v-else>Create</span>
                     </button>
-                    <button type="button" @click="showCreate = false" class="inline-flex justify-center py-2 px-4 border border-gray-300 dark:border-gray-600 shadow-sm text-sm font-medium rounded-md text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                    <button type="button" @click="showCreate = false" class="inline-flex justify-center py-2 px-4 border border-gray-300 dark:border-gray-600 shadow-sm text-sm font-medium" :class="[$styles.secondaryButton]">
                         Cancel
                     </button>
                 </form>
@@ -265,7 +265,7 @@ const FileStoreList = {
                                     <div class="flex items-center justify-between">
                                         <p class="text-sm font-medium text-blue-600 dark:text-blue-400 truncate">{{ store.displayName }}</p>
                                         <div class="ml-2 flex-shrink-0 flex">
-                                            <p class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                                            <p class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full" :class="[$styles.bgSuccess]">
                                                 {{ store.activeDocumentsCount || 0 }} docs
                                             </p>
                                         </div>
@@ -351,13 +351,14 @@ const FileStoreDetails = {
                  <div class="flex items-center gap-4">
                      <button type="button"
                         @click="$emit('back')"
-                        class="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                        class="p-2 rounded-full transition-colors focus:outline-none"
+                        :class="[$styles.icon,$styles.iconHover]"
                      >
                         <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
                      </button>
                      <div>
-                        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">{{ store.displayName }}</h1>
-                        <p class="text-sm text-gray-500 dark:text-gray-400">Upload documents to this store</p>
+                        <h1 class="text-2xl font-bold" :class="$styles.heading">{{ store.displayName }}</h1>
+                        <p class="text-sm" :class="$styles.muted">Upload documents to this store</p>
                      </div>
                  </div>
                  <div class="flex items-center gap-2">
@@ -365,7 +366,7 @@ const FileStoreDetails = {
                      <button type="button" 
                         @click="createNewChat(storeId)"
                         :disabled="uploading"
-                        class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                        class="inline-flex items-center px-4 py-2 border border-transparent rounded-full shadow-sm text-sm font-medium" :class="[$styles.primaryButton]">
                         <span v-if="uploading">Uploading...</span>
                         <span v-else>New Chat</span>
                      </button>
@@ -394,7 +395,7 @@ const FileStoreDetails = {
                         <span @click.prevent.stop="createNewChat(storeId)" 
                             class="cursor-pointer text-2xl text-gray-600" title="Ask Gemini RAG about All Documents"
                             >
-                            <svg class="size-7 text-gray-400 dark:text-gray-600 hover:text-blue-600 dark:hover:text-blue-400" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
+                            <svg class="size-7" :class="[$styles.muted]" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
                         </span>
                     </button>
 
@@ -420,7 +421,7 @@ const FileStoreDetails = {
                         <span @click.prevent.stop="createNewChat(storeId, { category: cat.category })" 
                             class="cursor-pointer text-2xl text-gray-600" :title="'Ask Gemini RAG about ' + (cat.category ? cat.category : 'Uncategorized') + ' documents'"
                             >
-                            <svg class="size-7 text-gray-400 dark:text-gray-600 hover:text-blue-600 dark:hover:text-blue-400" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
+                            <svg class="size-7" :class="[$styles.muted]" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
                         </span>
                     </button>
                 </div>
@@ -434,7 +435,7 @@ const FileStoreDetails = {
                     </span>
                 </h3>
                 <div class="flex items-center gap-2 flex-shrink-0">
-                    <div class="text-gray-400 dark:text-gray-500">
+                    <div :class="[$styles.muted]">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M13 19c0 .34.04.67.09 1H4a2 2 0 0 1-2-2V6c0-1.11.89-2 2-2h6l2 2h8a2 2 0 0 1 2 2v5.81c-.88-.51-1.9-.81-3-.81c-3.31 0-6 2.69-6 6m7-1v-3h-2v3h-3v2h3v3h2v-3h3v-2z"/></svg>
                     </div>
                     <input
@@ -442,7 +443,8 @@ const FileStoreDetails = {
                         v-model="newCategoryName"
                         @keyup.enter="createNewCategory"
                         placeholder="New category"
-                        class="w-48 rounded-md border-gray-300 dark:border-gray-600 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm dark:bg-gray-700 dark:text-white px-3 py-1.5"
+                        class="w-48 rounded-md shadow-sm sm:text-sm px-3 py-1.5"
+                        :class="[$styles.bgInput, $styles.textInput, $styles.borderInput]"
                     >
                 </div>
             </div>
@@ -457,10 +459,10 @@ const FileStoreDetails = {
                 <div class="mx-auto h-12 w-12 text-gray-400 text-5xl mb-4">📄</div>
                  <div v-if="(ext.prefs.category != null && ext.prefs.category !== '') || newCategoryName" class="mb-3 flex items-center justify-center gap-1">
                     📁
-                    <span class="font-medium text-gray-900 dark:text-white">{{ newCategoryName || ext.prefs.category }}</span>
+                    <span class="font-medium" :class="[$styles.heading]">{{ newCategoryName || ext.prefs.category }}</span>
                  </div>
                  <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-white">
-                    <span class="group-hover:text-blue-600">Upload a file</span> or drag and drop
+                    <span :class="[$styles.linkHover]">Upload a file</span> or drag and drop
                  </h3>
                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Upload PDFs, Text files or Markdown to get started.</p>
             </div>
@@ -475,7 +477,7 @@ const FileStoreDetails = {
                               </svg>
                            </div>
                            <input type="text" v-model.lazy="ext.prefs.q" placeholder="Search"
-                               class="block w-full pl-9 pr-8 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md leading-5 bg-white dark:bg-gray-700 placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 sm:text-sm text-gray-900 dark:text-white">
+                               class="block w-full pl-9 pr-8 py-1.5 rounded-md" :class="[$styles.bgInput, $styles.textInput, $styles.borderInput]">
                            <button v-if="ext.prefs.q" @click="ext.prefs.q = ''; loadDocuments()" type="button" class="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
                                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
@@ -551,7 +553,7 @@ const FileStoreDetails = {
                                 <span v-else-if="doc.state" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ doc.state }}</span>
                                 <span @click.prevent.stop="createNewChat(storeId, { document: doc })"
                                     class="cursor-pointer text-2xl text-gray-600" :title="'Ask Gemini RAG about ' + doc.displayName">
-                                    <svg class="size-6 text-gray-400 dark:text-gray-600 hover:text-blue-600 dark:hover:text-blue-400" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
+                                    <svg class="size-6" :class="[$styles.muted,$styles.mutedHover]" xmlns="http://www.w3.org/2000/svg" width="21" height="21" viewBox="0 0 21 21"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" d="M13.418 4.214A9.3 9.3 0 0 0 10.5 3.75c-4.418 0-8 3.026-8 6.759c0 1.457.546 2.807 1.475 3.91L3 19l3.916-2.447a9.2 9.2 0 0 0 3.584.714c4.418 0 8-3.026 8-6.758c0-.685-.12-1.346-.345-1.969M16.5 3.5v4m2-2h-4" stroke-width="1"/></svg>
                                 </span>
                             </div>
                        </div>
@@ -690,8 +692,8 @@ const FileStoreDetails = {
         }
 
         function selectCategory(category) {
-            ext.setPrefs({ 
-                page: 1, 
+            ext.setPrefs({
+                page: 1,
                 category,
                 sortBy: ext.prefs.sortBy === 'uploading' ? '-uploadedAt' : ext.prefs.sortBy,
             })
@@ -935,7 +937,7 @@ const FileStoreDetails = {
 
 const GeminiPage = {
     template: `
-        <div class="h-full bg-white dark:bg-gray-900 overflow-y-auto">
+        <div class="h-full overflow-y-auto">
             <div class="m-2">
                 <ErrorViewer />
             </div>
@@ -969,17 +971,17 @@ const GeminiPage = {
 }
 
 const GeminiHeader = {
-    template:`
-        <div v-if="fileSearch" class="flex space-x-1 items-center cursor-pointer text-xs rounded text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition-colors border hover:border-gray-300 dark:hover:border-gray-700"
+    template: `
+        <div v-if="fileSearch" class="flex space-x-1 items-center cursor-pointer text-xs rounded transition-colors border" :class="[$styles.tagLabel]"
             :title="fileSearch.description ? fileSearch.description : 'Gemini File Search'"
             @click="fileSearch.url ? $ctx.to(fileSearch.url) : null" style="line-height: 20px;"
         >
             <svg class="ml-1 size-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><title>Gemini File Search</title><path fill="currentColor" d="m19.6 21l-6.3-6.3q-.75.6-1.725.95T9.5 16q-2.725 0-4.612-1.888T3 9.5t1.888-4.612T9.5 3t4.613 1.888T16 9.5q0 1.1-.35 2.075T14.7 13.3l6.3 6.3zM9.5 14q1.875 0 3.188-1.312T14 9.5t-1.312-3.187T9.5 5T6.313 6.313T5 9.5t1.313 3.188T9.5 14"/></svg>
             <span class="inline-block mr-1">{{fileSearch.description}}</span>
-            <span v-if="fileSearch.category" class="bg-gray-200 dark:bg-gray-700 px-1 font-semibold" :title="'Search in category ' + fileSearch.category">
+            <span v-if="fileSearch.category" class="px-1 font-semibold" :class="[$styles.mutedIcon]" :title="'Search in category ' + fileSearch.category">
                 📂{{fileSearch.category}}
             </span>
-            <span v-else-if="fileSearch.document" class="bg-gray-200 dark:bg-gray-700 px-1 font-semibold" :title="'Search in document ' + fileSearch.document">
+            <span v-else-if="fileSearch.document" class="px-1 font-semibold" :class="[$styles.mutedIcon]" :title="'Search in document ' + fileSearch.document">
                 📄 {{fileSearch.document}}
             </span>
             <span v-else class="mr-1" title="Search All Documents">📚</span>
@@ -1020,13 +1022,13 @@ const GeminiHeader = {
         })
         return {
             fileSearch
-        }        
+        }
     }
 }
 
 const GeminiFooter = {
-    template:`
-        <div v-if="hasMetadata" class="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4 space-y-4">
+    template: `
+        <div v-if="hasMetadata" class="mt-4 border-t pt-4 space-y-4" :class="[$styles.chromeBorder]">
             <!-- Grounding Sources -->
             <div v-if="groundingChunks.length > 0" class="space-y-2">
                 <div class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">

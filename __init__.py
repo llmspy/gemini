@@ -50,7 +50,41 @@ def install(ctx):
         return row and g_db.to_dto(row, ["metadata", "customMetadata"])
 
     async def query_filestores(request):
-        rows = g_db.query_filestores(request.query, user=ctx.get_username(request))
+        user = ctx.get_username(request)
+        rows = g_db.query_filestores(request.query, user=user)
+        for row in rows:
+            if row.get("activeDocumentsCount") is None or row.get("sizeBytes") is None:
+                store_name = row.get("name")
+                fs_id = row.get("id")
+                updated = False
+                if store_name and g_client:
+                    try:
+                        res = g_client.file_search_stores.get(name=store_name)
+                        if res:
+                            row["activeDocumentsCount"] = res.active_documents_count
+                            row["pendingDocumentsCount"] = res.pending_documents_count
+                            row["failedDocumentsCount"] = res.failed_documents_count
+                            row["sizeBytes"] = res.size_bytes
+                            g_db.update_filestore(
+                                fs_id,
+                                {
+                                    "activeDocumentsCount": res.active_documents_count,
+                                    "pendingDocumentsCount": res.pending_documents_count,
+                                    "failedDocumentsCount": res.failed_documents_count,
+                                    "sizeBytes": res.size_bytes,
+                                },
+                                user=user,
+                            )
+                            updated = True
+                    except Exception as e:
+                        ctx.err(f"Failed to fetch filestore stats from Gemini for {store_name}", e)
+                if not updated and (row.get("activeDocumentsCount") is None or row.get("sizeBytes") is None):
+                    stats = g_db.get_filestore_stats(fs_id, user=user)
+                    if stats:
+                        if row.get("activeDocumentsCount") is None:
+                            row["activeDocumentsCount"] = stats.get("count", 0)
+                        if row.get("sizeBytes") is None:
+                            row["sizeBytes"] = stats.get("size", 0)
         dtos = [filestore_dto(row) for row in rows]
         return web.json_response(dtos)
 
@@ -233,6 +267,25 @@ def install(ctx):
                 raise Exception(f"Could not delete document {row.get('name')}: {e.message or e.status}")
 
         g_db.delete_document(id, user=user)
+        filestore_id = row.get("filestoreId")
+        if filestore_id:
+            filestore = g_db.get_filestore(filestore_id, user=user)
+            if filestore and filestore.get("name") and g_client:
+                try:
+                    res = g_client.file_search_stores.get(name=filestore.get("name"))
+                    if res:
+                        g_db.update_filestore(
+                            filestore_id,
+                            {
+                                "activeDocumentsCount": res.active_documents_count,
+                                "pendingDocumentsCount": res.pending_documents_count,
+                                "failedDocumentsCount": res.failed_documents_count,
+                                "sizeBytes": res.size_bytes,
+                            },
+                            user=user,
+                        )
+                except Exception as e:
+                    ctx.err("Failed to update filestore stats after doc deletion", e)
         return web.json_response({})
 
     ctx.add_delete("documents/{id}", delete_document)
@@ -430,6 +483,25 @@ def install(ctx):
             g_db.update_document(local_doc.get("id"), {"state": "METADATA_MISMATCH"}, user=user)
         for d in duplicate_docs:
             g_db.update_document(d.get("id"), {"state": "DUPLICATE_FILE"}, user=user)
+
+        try:
+            store_info = g_client.file_search_stores.get(name=filestore.get("name"))
+            if store_info:
+                g_db.update_filestore(
+                    int(id),
+                    {
+                        "displayName": store_info.display_name,
+                        "createTime": store_info.create_time,
+                        "updateTime": store_info.update_time,
+                        "activeDocumentsCount": store_info.active_documents_count,
+                        "pendingDocumentsCount": store_info.pending_documents_count,
+                        "failedDocumentsCount": store_info.failed_documents_count,
+                        "sizeBytes": store_info.size_bytes,
+                    },
+                    user=user,
+                )
+        except Exception as e:
+            ctx.err("Failed to update filestore stats during sync", e)
 
         ctx.log(
             f"Sync complete: total_remote={total_remote}, local_docs={len(local_docs)}, matched={matched_by_hash}, missing_metadata={len(missing_metadata)}, unmatched={len(local_missing)}"

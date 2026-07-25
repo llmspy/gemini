@@ -37,11 +37,12 @@ async function loadDocumentsWithDisplayNames(filestoreId, displayNames) {
 
 function getGeminiModel() {
     const geminiModels = [
-        'gemini-flash-latest',
         'gemini-flash-lite-latest',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
-        'gemini-2.5-pro',
+        'gemini-flash-latest',
+        'gemini-3.6-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.5-flash',
+        'gemini-3-pro-preview',
     ]
     for (const modelId of geminiModels) {
         const model = ctx.state.models
@@ -1157,7 +1158,9 @@ export default {
                 component: {
                     template: `<svg @click="$ctx.togglePath('/gemini')" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5" d="M3 12a9 9 0 0 0 9-9a9 9 0 0 0 9 9a9 9 0 0 0-9 9a9 9 0 0 0-9-9Z"/></svg>`
                 },
-                isActive({ path }) { return path.startsWith('/gemini') }
+                isActive({ path }) {
+                    return ctx.matchesPath(path, '/gemini*')
+                }
             }
         })
 
@@ -1171,7 +1174,6 @@ export default {
             gemini: {
                 component: GeminiHeader,
                 show({ thread }) {
-                    console.log("Checking GeminiHeader show for thread", thread)
                     return (thread.tools || []).filter(x => x.type === 'file_search').length
                 }
             }

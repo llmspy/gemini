@@ -52,7 +52,7 @@ class UploadWorker:
                     if doc.get("id") not in completed:
                         unprocessed_docs.append(doc)
                 if len(unprocessed_docs) == 0:
-                    return
+                    break
 
                 for doc in unprocessed_docs:
                     if not self.running:

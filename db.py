@@ -444,6 +444,14 @@ class GeminiDB:
             params,
         )
 
+    def get_filestore_stats(self, id, user=None):
+        sql_where, params = self.get_user_filter(user, {"id": id})
+        sql_where += " AND filestoreId = :id"
+        return self.db.one(
+            f"SELECT COUNT(*) as count, IFNULL(SUM(size), 0) AS size FROM document {sql_where}",
+            params,
+        )
+
     def custom_metadata_dto(self, custom_metadata):
         if custom_metadata is None:
             return None

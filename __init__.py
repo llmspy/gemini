@@ -1,28 +1,63 @@
 import asyncio
 import hashlib
+import io
 import json
 import mimetypes
 import os
+import posixpath
 import time
+import zipfile
+from datetime import datetime
 
 from aiohttp import web
 from google import genai
 from google.genai.errors import ClientError
 
-from .db import GeminiDB
+from . import ingest
+from . import db as g_db_module
+from .db import GeminiDB, category_ancestors
 from .upload_worker import UploadWorker
 
 g_db = None
 g_client = None
 g_worker = None
 
+# Checked in order, first one set wins. Mirrors the `google` provider's precedence in
+# providers.json, so a deployment that configured chat with GOOGLE_API_KEY doesn't
+# silently get this extension disabled.
+API_KEY_ENV = ("GOOGLE_API_KEY", "GEMINI_API_KEY")
+
+# Deployment-wide extension config. Lives beside the anonymous user's data because `default`
+# is the tail of the preference cascade, which makes it the global tier rather than a person's.
+GLOBAL_CONFIG_NAME = "config.json"
+g_config_cache = {"mtime": None, "data": {}}
+
+# Metadata a file upload may carry, as query params or form fields. Keeps the Upload tab
+# consistent with every other import option instead of being the one that arrives unlabelled.
+UPLOAD_METADATA_FIELDS = (
+    "category", "sourceUrl", "docType", "status", "locale", "product", "versions", "tags",
+)
+
+
+def metadata_from(values):
+    out = {}
+    for field in UPLOAD_METADATA_FIELDS:
+        raw = values.get(field)
+        if raw is None or raw == "":
+            continue
+        if field in ("versions", "tags"):
+            out[field] = [v.strip() for v in str(raw).split(",") if v.strip()]
+        else:
+            out[field] = raw
+    return out
+
 
 def install(ctx):
     global g_client, g_worker
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = next((os.getenv(name) for name in API_KEY_ENV if os.getenv(name)), None)
     if not api_key:
-        ctx.log("GEMINI_API_KEY is not configured")
+        ctx.log(f"{' or '.join(API_KEY_ENV)} is not configured")
         ctx.disabled = True
         return
 
@@ -43,11 +78,534 @@ def install(ctx):
     g_client = genai.Client(api_key=api_key)
     g_worker = UploadWorker(ctx, g_db, g_client)
 
+    # Which role a caller needs for write operations. Unset (the default) means any signed-in
+    # user, which is what a single-team deployment wants; set it to e.g. "Admin" or a custom
+    # role to restrict ingest and metadata changes to the people who curate the corpus.
+    write_role = os.getenv("GEMINI_WRITE_ROLE") or (ctx.get_config() or {}).get("gemini_write_role")
+
+    def auth_error(request, role=None):
+        """
+        Returns a 401/403 response when the caller may not perform a write.
+
+        Extension routes are not auth-gated by the server, and an anonymous caller resolves
+        to `user IS NULL` - the shared scope every deployment starts with. Without this an
+        unauthenticated request can create, upload to, sync and DELETE the shared filestores.
+        Reads are left open: the null-user scope is the deliberate "shared with everyone here"
+        bucket, and gating it would break existing single-user setups.
+        """
+        if not ctx.is_auth_enabled():
+            return None
+        if not ctx.get_username(request):
+            return web.json_response(ctx.error_auth_required, status=401)
+        required = role or write_role
+        if not required:
+            return None
+        if required == "Admin" and ctx.is_admin(request):
+            return None
+        session = ctx.get_session(request) or {}
+        if required in (session.get("roles") or []) or "Admin" in (session.get("roles") or []):
+            return None
+        return web.json_response(
+            {"error": {"errorCode": "Forbidden", "message": f"Requires the '{required}' role"}},
+            status=403,
+        )
+
+    def global_config_path():
+        # `default` is the anonymous user and the tail of the preference cascade, so this file is
+        # the deployment-wide tier rather than one person's settings. get_user_path() with no
+        # argument already resolves to user/default.
+        return os.path.join(ctx.get_user_path(), GLOBAL_CONFIG_NAME)
+
+    def global_config():
+        """
+        Deployment-wide config, re-read whenever the file changes so an operator adding an
+        import root does not have to restart the server.
+        """
+        path = global_config_path()
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            g_config_cache["mtime"], g_config_cache["data"] = None, {}
+            return {}
+        if g_config_cache["mtime"] != mtime:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    g_config_cache["data"] = json.load(f) or {}
+            except Exception as e:
+                # Reading a malformed config as "{}" silently changes who can import what, so
+                # say it out loud and keep the last copy that parsed.
+                ctx.log(f"gemini: could not parse {path}: {e}")
+            g_config_cache["mtime"] = mtime
+        return g_config_cache["data"]
+
+    def normalize_root(raw):
+        """
+        A root as it should be stored and shown: trimmed, and without a trailing slash.
+
+        `/srv/docs/` resolves to the same folder as `/srv/docs`, but keeping both spellings
+        made the UI render value + resolved as two different paths. `/` is the exception - it
+        is nothing but slashes, and stripping them would leave an empty root.
+        """
+        raw = str(raw or "").strip()
+        if len(raw) > 1:
+            raw = raw.rstrip("/")
+        return raw
+
+    def configured_import_roots():
+        """The roots exactly as written in config (normalized), plus whether they came from there at all."""
+        cfg = global_config()
+        roots = (cfg.get("gemini") or {}).get("importRoots")
+        if roots is None:
+            roots = cfg.get("importRoots")
+        if roots is None:
+            return [], False
+        return [normalize_root(r) for r in (roots or []) if normalize_root(r)], True
+
+    def save_import_roots(roots):
+        """
+        Write `gemini.importRoots`, preserving everything else in the file.
+
+        Stored as written rather than resolved, so an operator's `~/docs` stays portable and
+        `$WORKSPACE` keeps tracking the workspace.
+        """
+        path = global_config_path()
+        cfg = {}
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    cfg = json.load(f) or {}
+            except Exception as e:
+                # Overwriting a file that failed to parse would discard whatever else is in it.
+                raise Exception(f"Refusing to overwrite {path}: it does not parse ({e})") from e
+        section = cfg.get("gemini")
+        if not isinstance(section, dict):
+            section = {}
+        section["importRoots"] = roots
+        cfg["gemini"] = section
+        # A stale top-level key would keep winning for readers that check it first.
+        cfg.pop("importRoots", None)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+        g_config_cache["mtime"] = None
+        return cfg
+
+    def describe_root(raw):
+        """What the UI needs to show a root honestly: where it lands, and whether that's a trap."""
+        resolved = raw
+        if raw.startswith("$") and hasattr(ctx, "resolve_directory"):
+            resolved = ctx.resolve_directory(raw) or ""
+        resolved = ingest.resolve_path(resolved) if resolved else ""
+        home = ingest.resolve_path("~")
+        return {
+            "value": raw,
+            "resolved": resolved,
+            "exists": bool(resolved) and os.path.isdir(resolved),
+            # A root at / or at the home directory makes the rail decorative. Not refused - an
+            # admin may mean it - but never applied silently.
+            "broad": bool(resolved) and (resolved == os.sep or resolved == home),
+        }
+
+    def resolve_roots(raw):
+        """Resolve a list of configured paths, expanding the server's $WORKSPACE/$TEMP aliases."""
+        out = []
+        for r in raw or []:
+            r = str(r)
+            if r.startswith("$") and hasattr(ctx, "resolve_directory"):
+                r = ctx.resolve_directory(r)
+                if not r:
+                    continue
+            out.append(ingest.resolve_path(r))
+        return sorted(set(out))
+
+    def allowed_directories():
+        """The directories the server itself grants: $WORKSPACE, $TEMP and friends."""
+        if not hasattr(ctx, "resolve_allowed_directories"):
+            return []
+        return resolve_roots(ctx.resolve_allowed_directories())
+
+    def trusted_import_roots():
+        """
+        Every folder a non-admin may import from, as resolved absolute paths.
+
+        The union of `gemini.importRoots` in the global config and the directories the server
+        already grants. A union rather than an override because the two answer the same question
+        - "where may this deployment read from" - and configuring one should not silently revoke
+        the other. It also means the list the UI shows is the list that is actually enforced.
+        """
+        configured, _ = configured_import_roots()
+        return sorted(set(resolve_roots(configured)) | set(allowed_directories()))
+
+    def assert_source_allowed(source, request=None):
+        """
+        A source that reads the filesystem is confined to the folders the deployment trusts.
+        An ingest source is not a licence to read /etc.
+
+        Admins are exempt: it is their machine, and the preview step lists every file before
+        anything is read into a store. `is_admin()` is True whenever auth is disabled, which is
+        what lets a single-user install import from anywhere without configuring it first.
+        """
+        config = source.get("config") or {}
+        path = config.get("path")
+        if not path:
+            return
+        if request is not None and ctx.is_admin(request):
+            return
+        roots = trusted_import_roots()
+        if not roots:
+            raise Exception(
+                "No import folders are configured. An Admin can list them under "
+                f'"gemini": {{"importRoots": [...]}} in {global_config_path()}'
+            )
+        if ingest.within_roots(path, roots):
+            return
+        # Name the roots: "outside the allowed directories" leaves the caller with nowhere to
+        # go, and GET source-types discloses them to this same caller anyway.
+        raise Exception(
+            f"'{ingest.resolve_path(path)}' is outside the folders you may import from. "
+            "Allowed: " + ", ".join(roots)
+        )
+
+    # Filter operators the schema depends on, with what each one enables. Unproven capabilities
+    # are assumed present so nothing is disabled by default; a probe that fails downgrades them.
+    capability_probes = [
+        ('docType="guide"', "equality", "baseline (documented)"),
+        ('docType="guide" AND status="published"', "and", "combining facets"),
+        ('versions:"v8"', "listHas", "versions and tags as lists; categoryPath subtree filtering"),
+        ("sortKey > 1700000000", "numeric", "staleness filtering on updatedAt"),
+        ('docType="guide" OR docType="faq"', "or", "multi-select facets"),
+        ('NOT status="deprecated"', "not", "excluding deprecated content by default"),
+    ]
+    capabilities_path = os.path.join(ctx.get_user_path(), "gemini", "capabilities.json")
+
+    def load_capabilities():
+        try:
+            if os.path.exists(capabilities_path):
+                with open(capabilities_path, encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            ctx.err("Failed reading capabilities", e)
+        return {
+            "probed": False,
+            "note": "Not probed. Assuming full AIP-160 support; POST capabilities/probe to verify.",
+            "operators": {key: True for _, key, _ in capability_probes},
+            "enables": {key: why for _, key, why in capability_probes},
+        }
+
+    def save_capabilities(result):
+        try:
+            os.makedirs(os.path.dirname(capabilities_path), exist_ok=True)
+            with open(capabilities_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2)
+        except Exception as e:
+            ctx.err("Failed saving capabilities", e)
+
+    def run_capability_probe():
+        """
+        Determine which filter operators this deployment actually supports.
+
+        Two fixtures with contrasting metadata, and a question that retrieves both. An operator is
+        judged by *which* document comes back, not by whether anything does: a filter that returns
+        both is being ignored, one that returns neither is a retrieval miss rather than a rejection.
+
+        Retrieval through generate_content is nondeterministic, so each expression is retried and a
+        no-filter baseline gates the whole run - without it a quiet retrieval failure reads as
+        "every operator is unsupported", which is how the first version of this got it wrong.
+        """
+        import tempfile
+
+        # The same values under several key spellings, so a filter that fails can be attributed
+        # to the key rather than the operator. camelCase is what the schema uses today.
+        def meta(doc_type, status, sort_key, versions):
+            return [
+                {"key": "docType", "string_value": doc_type},      # camelCase
+                {"key": "doctype", "string_value": doc_type},      # lowercase
+                {"key": "doc_type", "string_value": doc_type},     # snake_case
+                {"key": "status", "string_value": status},         # lowercase control
+                {"key": "sortKey", "numeric_value": sort_key},     # camelCase numeric
+                {"key": "sortkey", "numeric_value": sort_key},     # lowercase numeric
+                {"key": "versions", "string_list_value": {"values": versions}},
+            ]
+
+        fixtures = [
+            {
+                "key": "alpha",
+                "text": "The Alpha widget costs exactly one hundred dollars and ships from Perth.",
+                "meta": meta("guide", "published", 1755648000, ["v7", "v8"]),
+            },
+            {
+                "key": "beta",
+                "text": "The Beta widget costs exactly two hundred dollars and ships from Sydney.",
+                "meta": meta("faq", "deprecated", 1600000000, ["v6"]),
+            },
+        ]
+        # (expression, expected fixture keys, operator, what it enables)
+        checks = [
+            ('status="published"', {"alpha"}, "equality", "baseline equality, lowercase key"),
+            ('docType="guide"', {"alpha"}, "keyCamel", "camelCase keys - what the schema uses"),
+            ('doctype="guide"', {"alpha"}, "keyLower", "all-lowercase keys"),
+            ('doc_type="guide"', {"alpha"}, "keySnake", "snake_case keys"),
+            ('versions:"v8"', {"alpha"}, "listHas",
+             "versions and tags as lists; categoryPath subtree filtering"),
+            ("sortkey > 1700000000", {"alpha"}, "numeric", "staleness filtering on updatedAt"),
+            ("sortKey > 1700000000", {"alpha"}, "numericCamel", "numeric comparison on a camelCase key"),
+            ('status="published" AND versions:"v8"', {"alpha"}, "and", "combining facets"),
+            ('status="published" OR status="deprecated"', {"alpha", "beta"}, "or", "multi-select facets"),
+            ('NOT status="deprecated"', {"alpha"}, "not", "excluding deprecated content by default"),
+        ]
+        question = "According to the documents, list every widget and exactly what it costs."
+        model = os.getenv("GEMINI_PROBE_MODEL", "gemini-flash-latest")
+
+        def cited(metadata_filter, attempts=3):
+            """Fixture keys the answer was grounded in, best of N (retrieval is nondeterministic)."""
+            best = set()
+            for attempt in range(attempts):
+                file_search = {"file_search_store_names": [store.name], "top_k": 10}
+                if metadata_filter:
+                    file_search["metadata_filter"] = metadata_filter
+                try:
+                    res = g_client.models.generate_content(
+                        model=model, contents=question, config={"tools": [{"file_search": file_search}]}
+                    )
+                except Exception as e:
+                    ctx.dbg(f"Probe '{metadata_filter}' errored: {e}")
+                    return set(), str(e)[:200]
+                found = set()
+                for cand in res.candidates or []:
+                    gm = getattr(cand, "grounding_metadata", None)
+                    for chunk in (getattr(gm, "grounding_chunks", None) or []) if gm else []:
+                        rc = getattr(chunk, "retrieved_context", None)
+                        title = ((getattr(rc, "title", "") or "") if rc else "").lower()
+                        for fx in fixtures:
+                            if fx["key"] in title:
+                                found.add(fx["key"])
+                if len(found) > len(best):
+                    best = found
+                if attempt < attempts - 1 and not found:
+                    time.sleep(2)
+            return best, None
+
+        store = g_client.file_search_stores.create(config={"display_name": "llms-filter-probe"})
+        operators, detail = {}, {}
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                for fx in fixtures:
+                    path = os.path.join(tmp, f"{fx['key']}.txt")
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(fx["text"])
+                    op = g_client.file_search_stores.upload_to_file_search_store(
+                        file_search_store_name=store.name,
+                        file=path,
+                        config={"display_name": f"{fx['key']}.txt", "custom_metadata": fx["meta"]},
+                    )
+                    while not op.done:
+                        time.sleep(3)
+                        op = g_client.operations.get(op)
+                    if op.error:
+                        raise Exception(op.error.message)
+                time.sleep(8)
+
+                # Gate on the baseline: if an unfiltered query can't retrieve both fixtures,
+                # nothing below can be trusted.
+                baseline, err = cited(None, attempts=4)
+                if len(baseline) < len(fixtures):
+                    return {
+                        "probed": False,
+                        "probedAt": datetime.now().isoformat(" "),
+                        "error": (
+                            f"Baseline retrieval returned {sorted(baseline) or 'nothing'} instead of "
+                            f"both fixtures{': ' + err if err else ''}. Filter results would be "
+                            "meaningless, so nothing was concluded."
+                        ),
+                        "operators": {key: True for _, _, key, _ in checks},
+                        "enables": {key: why for _, _, key, why in checks},
+                    }
+
+                for expr, want, key, _ in checks:
+                    got, err = cited(expr)
+                    operators[key] = got == want
+                    detail[key] = {
+                        "expression": expr,
+                        "expected": sorted(want),
+                        "got": sorted(got),
+                        "verdict": (
+                            "ok" if got == want
+                            else "error" if err
+                            else "filter ignored" if got == {f["key"] for f in fixtures}
+                            else "rejected or no match"
+                        ),
+                        **({"error": err} if err else {}),
+                    }
+        finally:
+            try:
+                g_client.file_search_stores.delete(name=store.name, config={"force": True})
+            except Exception as e:
+                ctx.err("Failed deleting probe store", e)
+
+        return {
+            "probed": True,
+            "probedAt": datetime.now().isoformat(" "),
+            "model": model,
+            "operators": operators,
+            "enables": {key: why for _, _, key, why in checks},
+            "detail": detail,
+        }
+
     def filestore_dto(row):
-        return row and g_db.to_dto(row, ["metadata"])
+        return row and g_db.to_dto(row, ["metadata", "facets"])
+
+    def source_dto(row):
+        return row and g_db.to_dto(
+            row,
+            ["config", "category", "rules", "include", "exclude", "extract", "chunking", "volatile", "cursor"],
+        )
+
+    async def run_source_pipeline(source_row, user, dry_run=True, override=None, confirm_deletes=False):
+        """
+        discover -> fetch -> extract -> derive -> diff, then (unless dry run) apply.
+
+        Applying writes documents locally and queues them; the upload worker does the spending.
+        A run that fails during discovery never computes deletions, so a half-finished crawl
+        can't conclude the other half was deleted.
+        """
+        filestore_id = int(source_row.get("filestoreId"))
+        source = ingest.create_source(ctx, source_row.get("type"), source_row.get("config") or {})
+        existing = g_db.documents_by_source_key(filestore_id, source_row.get("id"), user=user)
+
+        run_id = await g_db.create_run_async(
+            {"sourceId": source_row.get("id"), "status": "preview" if dry_run else "running", "dryRun": 1 if dry_run else 0},
+            user=user,
+        )
+
+        try:
+            plan = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: ingest.build_plan(source_row, source, existing, override)
+            )
+        except Exception as e:
+            g_db.update_run(run_id, {"status": "failed", "completedAt": datetime.now(),
+                                     "error": ctx.error_message(e)}, user=user)
+            raise
+        finally:
+            if hasattr(source, "close"):
+                source.close()
+
+        summary = plan.summary()
+        refusal = None if confirm_deletes else ingest.check_delete_rails(plan, len(existing))
+        if refusal:
+            summary["deleteRefused"] = refusal
+            plan.removed = []
+
+        if dry_run:
+            g_db.update_run(run_id, {"status": "preview", "completedAt": datetime.now(),
+                                     "plan": summary, **plan.counts()}, user=user)
+            return {"runId": run_id, "dryRun": True, **summary}
+
+        applied = await apply_plan(plan, source_row, filestore_id, user)
+        g_db.update_run(run_id, {"status": "completed", "completedAt": datetime.now(),
+                                 "plan": summary, **plan.counts()}, user=user)
+        g_db.update_source(source_row.get("id"), {"lastRunId": run_id, "lastRunAt": datetime.now(),
+                                                  "error": None}, user=user)
+        g_worker.start()
+        return {"runId": run_id, "dryRun": False, **summary, **applied}
+
+    async def apply_plan(plan, source_row, filestore_id, user):
+        """Write the plan locally and queue it; nothing reaches Gemini until the worker runs."""
+        source_id = source_row.get("id")
+        queued = 0
+
+        for entry in plan.add + plan.change + plan.metadata_only:
+            text = entry.get("text") or ""
+            content = text.encode("utf-8")
+            sha256_hash = hashlib.sha256(content).hexdigest()
+            ext = ingest.ext_of(entry["sourceKey"]) or "txt"
+            # Extracted text is what gets indexed, so HTML is cached as the markdown it became.
+            if ext in ingest.HTML_EXTS:
+                ext = "md"
+            save_filename = f"{sha256_hash}.{ext}"
+            relative_path = f"{sha256_hash[:2]}/{save_filename}"
+            full_path = ctx.get_cache_path(relative_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "wb") as f:
+                f.write(content)
+
+            doc = {
+                "filestoreId": filestore_id,
+                "sourceId": source_id,
+                "sourceKey": entry["sourceKey"],
+                "sourceEtag": entry.get("sourceEtag"),
+                "displayName": entry.get("displayName"),
+                "filename": save_filename,
+                "url": f"/~cache/{relative_path}",
+                "hash": sha256_hash,
+                "size": len(content),
+                "mimeType": ctx.get_file_mime_type(entry["sourceKey"]),
+                "contentHash": entry.get("contentHash"),
+                "metadataHash": entry.get("metadataHash"),
+                "extractorVer": entry.get("extractorVer"),
+                "tombstonedAt": None,
+                "error": None,
+                "uploadedAt": None,  # queues it for the worker
+            }
+            for field in ("category", "categoryPath", "docType", "status", "locale", "product",
+                          "versions", "tags", "sourceUrl", "sourceUpdatedAt"):
+                if field in entry:
+                    # Root-level documents use one representation in storage. Older imports wrote
+                    # an empty string, so query/facet compatibility remains in db.py, but new rows
+                    # are NULL and naturally participate in the uncategorised filter.
+                    doc[field] = None if field == "category" and not entry[field] else entry[field]
+
+            existing_id = entry.get("id")
+            if existing_id:
+                prior = g_db.get_document(existing_id, user=user)
+                # The remote copy is immutable, so a replace deletes it first; the local row and
+                # its id survive, which is what stops a changed document becoming a duplicate.
+                if prior and prior.get("name"):
+                    try:
+                        g_client.file_search_stores.documents.delete(name=prior.get("name"), config={"force": True})
+                    except ClientError as e:
+                        if e.code != 404:
+                            ctx.err(f"Could not delete {prior.get('name')} before replace", e)
+                    except Exception as e:
+                        ctx.err(f"Could not delete {prior.get('name')} before replace", e)
+                doc["name"] = None
+                await g_db.update_document_async(existing_id, doc, user=user)
+            else:
+                await g_db.create_document_async(doc, user=user)
+            queued += 1
+
+        on_delete = source_row.get("onDelete") or "tombstone"
+        removed = 0
+        for doc in plan.removed:
+            if on_delete == "ignore":
+                continue
+            if doc.get("name"):
+                try:
+                    g_client.file_search_stores.documents.delete(name=doc.get("name"), config={"force": True})
+                except ClientError as e:
+                    if e.code != 404:
+                        ctx.err(f"Could not delete {doc.get('name')}", e)
+                except Exception as e:
+                    ctx.err(f"Could not delete {doc.get('name')}", e)
+            if on_delete == "remove":
+                g_db.delete_document(doc.get("id"), user=user)
+            else:
+                g_db.update_document(
+                    doc.get("id"), {"tombstonedAt": datetime.now(), "name": None, "state": "REMOVED_UPSTREAM"},
+                    user=user,
+                )
+            removed += 1
+
+        return {"queued": queued, "removedApplied": removed}
 
     def document_dto(row):
-        return row and g_db.to_dto(row, ["metadata", "customMetadata"])
+        # SQLite stores list metadata as JSON text. Decode it at the API boundary so the UI gets
+        # arrays (and renders `autoquery`) rather than JSON source text (`["autoquery"]`).
+        return row and g_db.to_dto(
+            row, ["metadata", "customMetadata", "categoryPath", "versions", "tags"]
+        )
 
     async def query_filestores(request):
         user = ctx.get_username(request)
@@ -91,6 +649,9 @@ def install(ctx):
     ctx.add_get("filestores", query_filestores)
 
     async def create_filestore(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
         user = ctx.get_username(request)
         filestore = await request.json()
         display_name = filestore.get("displayName")
@@ -123,6 +684,9 @@ def install(ctx):
     ctx.add_post("filestores", create_filestore)
 
     async def delete_filestore(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
         id = request.match_info["id"]
         user = ctx.get_username(request)
         row = g_db.get_filestore(id, user=user)
@@ -142,102 +706,180 @@ def install(ctx):
 
     ctx.add_delete("filestores/{id}", delete_filestore)
 
+    def cache_bytes(content, filename, mimetype):
+        """Write to the content-addressed cache and return (relativePath, url, savedName)."""
+        sha256_hash = hashlib.sha256(content).hexdigest()
+        ext = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
+        if not ext:
+            ext = (mimetypes.guess_extension(mimetype) or "").lstrip(".")
+        save_filename = f"{sha256_hash}.{ext}" if ext else sha256_hash
+        relative_path = f"{sha256_hash[:2]}/{save_filename}"
+        full_path = ctx.get_cache_path(relative_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "wb") as f:
+            f.write(content)
+        with open(os.path.splitext(full_path)[0] + ".info.json", "w") as f:
+            json.dump(
+                {"date": int(time.time()), "url": f"/~cache/{relative_path}", "size": len(content),
+                 "type": mimetype, "name": filename},
+                f,
+            )
+        return sha256_hash, save_filename, f"/~cache/{relative_path}"
+
+    def expand_zip(content, base_category):
+        """
+        Turn an uploaded archive into the documents inside it.
+
+        A zip is a transport, not a document - indexing the archive itself would produce one
+        useless blob. Entries keep their internal folder structure as their category, and a single
+        wrapper directory (what every GitHub "Download ZIP" produces) is stripped so categories
+        don't all start with `repo-main/`.
+        """
+        def keep(name):
+            key = name.replace("\\", "/").lstrip("/")
+            return not ("__MACOSX/" in key or ingest.matches_any(key, ingest.DEFAULT_EXCLUDES))
+
+        entries = []
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            # Junk is excluded *before* looking for a wrapper: a stray __MACOSX/ entry would
+            # otherwise make the archive look like it has two roots and defeat the strip.
+            names = [i.filename for i in zf.infolist() if not i.is_dir() and keep(i.filename)]
+            tops = {n.split("/", 1)[0] for n in names if "/" in n}
+            wrapper = next(iter(tops)) if len(tops) == 1 and all("/" in n for n in names) else None
+
+            for info in zf.infolist():
+                if info.is_dir() or not keep(info.filename):
+                    continue
+                key = info.filename.replace("\\", "/").lstrip("/")
+                if wrapper and key.startswith(wrapper + "/"):
+                    key = key[len(wrapper) + 1 :]
+                if not key:
+                    continue
+                raw = zf.read(info.filename)
+
+                # Same extraction the ingest pipeline uses, so a zip and a folder of the same
+                # content produce identical documents. An unsupported type (a PDF) is passed
+                # through as-is for Gemini to handle rather than dropped.
+                text, _front, skip = ingest.extract(raw, key)
+                if skip and skip.startswith("unsupported"):
+                    payload, name = raw, key
+                elif skip:
+                    ctx.dbg(f"Skipping {key} from archive: {skip}")
+                    continue
+                else:
+                    payload = text.encode("utf-8")
+                    name = key[:-len(key.split(".")[-1]) - 1] + ".md" if key.lower().endswith((".html", ".htm")) else key
+
+                folder = posixpath.dirname(key)
+                parts = [p for p in (base_category, folder) if p]
+                entries.append({
+                    "key": key,
+                    "displayName": posixpath.basename(name),
+                    "content": payload,
+                    "category": "/".join(parts) or None,
+                })
+        return entries
+
     async def upload_to_filestore(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
         user = ctx.get_username(request)
         id = request.match_info["id"]
         ctx.log(f"upload_to_filestore {id} {user if user else ''}")
-        category = request.query.get("category")
+        # Metadata travels with the upload, so a file arrives labelled rather than needing a bulk
+        # backfill afterwards - the same rule that makes ingest the place metadata comes from.
+        meta = metadata_from(request.query)
+        category = meta.pop("category", None)
 
         filestore = g_db.get_filestore(id, user=user)
         if not filestore:
             raise Exception("Filestore does not exist")
 
-        tasks = []
+        doc_ids = []
         reader = await request.multipart()
 
         field = await reader.next()
         while field:
-            if field.name != "file" and not field.name.startswith("file"):
+            # A metadata field applies to every file that follows it in the request until the next
+            # one overrides it, so one POST can carry a whole set with differing values. The query
+            # string sets the request-wide default.
+            if field.name in UPLOAD_METADATA_FIELDS:
+                value = (await field.read(decode=True)).decode("utf-8").strip() or None
+                if field.name == "category":
+                    category = value
+                elif field.name in ("versions", "tags"):
+                    meta[field.name] = [v.strip() for v in (value or "").split(",") if v.strip()]
+                else:
+                    meta[field.name] = value
                 field = await reader.next()
                 continue
 
-            if not field.filename:
+            if (field.name != "file" and not field.name.startswith("file")) or not field.filename:
                 field = await reader.next()
                 continue
 
             filename = field.filename
             content = await field.read()
-            mimetype = ctx.get_file_mime_type(filename)
 
-            # Calculate SHA256
-            sha256_hash = hashlib.sha256(content).hexdigest()
-            ext = filename.rsplit(".", 1)[1] if "." in filename else ""
-            if not ext:
-                ext = mimetypes.guess_extension(mimetype) or ""
-                if ext.startswith("."):
-                    ext = ext[1:]
+            if filename.lower().endswith(".zip"):
+                entries = expand_zip(content, category)
+                ctx.log(f"Expanded {filename} into {len(entries)} document(s)")
+            else:
+                entries = [{"key": filename, "displayName": filename, "content": content,
+                            "category": category}]
 
-            if not ext:
-                ext = "bin"
-
-            save_filename = f"{sha256_hash}.{ext}" if ext else sha256_hash
-
-            # Use first 2 chars for subdir to avoid too many files in one dir
-            subdir = sha256_hash[:2]
-            relative_path = f"{subdir}/{save_filename}"
-            full_path = ctx.get_cache_path(relative_path)
-            url = f"/~cache/{relative_path}"
-
-            existing_doc = g_db.find_document({"hash": sha256_hash}, user=user)
-            if existing_doc:
-                # If doc exists delete document and create new
-                document_name = existing_doc.get("name")
-                try:
-                    ctx.dbg(f"Deleting existing document {document_name} from filestore...")
-                    g_client.file_search_stores.documents.delete(name=document_name, config={"force": True})
-                except Exception as e:
-                    ctx.err(f"Could not delete document {document_name}", e)
-                g_db.delete_document(existing_doc.get("id"), user=user)
-
-            # New document
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-
-            with open(full_path, "wb") as f:
-                f.write(content)
-
-            info = {
-                "date": int(time.time()),
-                "url": url,
-                "size": len(content),
-                "type": mimetype,
-                "name": filename,
-            }
-            # Save metadata
-            info_path = os.path.splitext(full_path)[0] + ".info.json"
-            with open(info_path, "w") as f:
-                json.dump(info, f)
-
-            task = g_db.create_document_async(
-                {
+            for entry in entries:
+                mimetype = ctx.get_file_mime_type(entry["displayName"])
+                sha, save_filename, url = cache_bytes(entry["content"], entry["displayName"], mimetype)
+                doc = {
                     "filename": save_filename,
                     "url": url,
-                    "hash": sha256_hash,
-                    "size": len(content),
-                    "displayName": filename,
+                    "hash": sha,
+                    "size": len(entry["content"]),
+                    "displayName": entry["displayName"],
                     "mimeType": mimetype,
                     "filestoreId": int(id),
-                    "category": category,
-                },
-                user=user,
-            )
-            tasks.append(asyncio.create_task(task))
+                    "sourceKey": entry["key"],
+                    "category": entry["category"],
+                    "categoryPath": category_ancestors(entry["category"]),
+                    "contentHash": ingest.content_hash(
+                        entry["content"].decode("utf-8", "ignore") if len(entry["content"]) < 5_000_000 else ""
+                    ),
+                    "error": None,
+                    "uploadedAt": None,
+                    **meta,
+                }
+                # Uploads don't run through build_plan, so the same expansion has to happen here
+                # or a `{category}/{name}` template would be stored with its braces intact.
+                if doc.get("sourceUrl"):
+                    doc["sourceUrl"] = ingest.expand_template(
+                        doc["sourceUrl"],
+                        ingest.template_values(entry["key"], entry["category"], entry["displayName"]),
+                    )
+                # Re-uploading the same path replaces in place. Identity is the source key, so a
+                # second upload of the same archive updates rather than duplicating - and the
+                # unique index would reject an insert anyway.
+                prior = g_db.find_document({"filestoreId": int(id), "sourceKey": entry["key"]}, user=user)
+                if prior:
+                    if prior.get("name"):
+                        try:
+                            g_client.file_search_stores.documents.delete(
+                                name=prior.get("name"), config={"force": True})
+                        except ClientError as e:
+                            if e.code != 404:
+                                ctx.err(f"Could not delete {prior.get('name')}", e)
+                        except Exception as e:
+                            ctx.err(f"Could not delete {prior.get('name')}", e)
+                    doc["name"] = None
+                    await g_db.update_document_async(prior.get("id"), doc, user=user)
+                    doc_ids.append(prior.get("id"))
+                else:
+                    doc_ids.append(await g_db.create_document_async(doc, user=user))
 
             field = await reader.next()
 
-        # wait all tasks
-        doc_ids = await asyncio.gather(*tasks) if tasks else []
-        docs = g_db.query_documents({"ids_in": doc_ids}, user=user)
-
+        docs = g_db.query_documents({"ids_in": doc_ids}, user=user) if doc_ids else []
         g_worker.start()
 
         return web.json_response(docs)
@@ -251,41 +893,72 @@ def install(ctx):
 
     ctx.add_get("documents", query_documents)
 
+    async def count_documents(request):
+        """
+        How many documents the *current* query matches.
+
+        Paging used to infer this from a separate category list, which knew nothing about search,
+        facet filters or the root's no-category rule - so the page count routinely disagreed with
+        the rows on screen. Counting the same filter the rows come from is the only way the two
+        can agree.
+        """
+        return web.json_response({"count": g_db.count_documents(request.query, user=ctx.get_username(request))})
+
+    ctx.add_get("documents/count", count_documents)
+
+    def remove_document(row, user=None):
+        """
+        Delete one document from Gemini and locally.
+
+        Shared by the single-row delete and the bulk one so a selection of 40 can't drift from
+        what deleting them one at a time would have done.
+        """
+        if row.get("name"):
+            try:
+                g_client.file_search_stores.documents.delete(name=row.get("name"), config={"force": True})
+            except ClientError as e:
+                if e.code == 404:
+                    ctx.dbg(f"Document {row.get('name')} already deleted in Gemini")
+                else:
+                    raise Exception(
+                        f"Could not delete document {row.get('name')}: {e.message or e.status}"
+                    ) from e
+        g_db.delete_document(row.get("id"), user=user)
+
+    def refresh_filestore_stats(filestore_id, user=None):
+        """Re-read the counts Gemini holds for a store, after something changed how many there are."""
+        filestore = g_db.get_filestore(filestore_id, user=user)
+        if not (filestore and filestore.get("name") and g_client):
+            return
+        try:
+            res = g_client.file_search_stores.get(name=filestore.get("name"))
+            if res:
+                g_db.update_filestore(
+                    filestore_id,
+                    {
+                        "activeDocumentsCount": res.active_documents_count,
+                        "pendingDocumentsCount": res.pending_documents_count,
+                        "failedDocumentsCount": res.failed_documents_count,
+                        "sizeBytes": res.size_bytes,
+                    },
+                    user=user,
+                )
+        except Exception as e:
+            ctx.err("Failed to update filestore stats after doc deletion", e)
+
     async def delete_document(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
         id = request.match_info["id"]
         user = ctx.get_username(request)
         row = g_db.get_document(id, user=user)
         if not row:
             raise Exception("Document does not exist")
 
-        try:
-            g_client.file_search_stores.documents.delete(name=row.get("name"), config={"force": True})
-        except ClientError as e:
-            if e.code == 404:
-                ctx.dbg(f"Document {row.get('name')} already deleted in Gemini")
-            else:
-                raise Exception(f"Could not delete document {row.get('name')}: {e.message or e.status}")
-
-        g_db.delete_document(id, user=user)
-        filestore_id = row.get("filestoreId")
-        if filestore_id:
-            filestore = g_db.get_filestore(filestore_id, user=user)
-            if filestore and filestore.get("name") and g_client:
-                try:
-                    res = g_client.file_search_stores.get(name=filestore.get("name"))
-                    if res:
-                        g_db.update_filestore(
-                            filestore_id,
-                            {
-                                "activeDocumentsCount": res.active_documents_count,
-                                "pendingDocumentsCount": res.pending_documents_count,
-                                "failedDocumentsCount": res.failed_documents_count,
-                                "sizeBytes": res.size_bytes,
-                            },
-                            user=user,
-                        )
-                except Exception as e:
-                    ctx.err("Failed to update filestore stats after doc deletion", e)
+        remove_document(row, user=user)
+        if row.get("filestoreId"):
+            refresh_filestore_stats(row.get("filestoreId"), user=user)
         return web.json_response({})
 
     ctx.add_delete("documents/{id}", delete_document)
@@ -329,19 +1002,18 @@ def install(ctx):
     ctx.add_get("filestores/{id}/categories", filestore_categories)
 
     async def upload_document(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
         user = ctx.get_username(request)
         id = int(request.match_info["id"])
         doc = g_db.get_document(int(id), user=user)
         if not doc:
             raise Exception("Document does not exist")
 
-        if doc.get("name"):
-            try:
-                ctx.dbg(f"Deleting existing document {doc.get('name')} from filestore...")
-                g_client.file_search_stores.documents.delete(name=doc.get("name"), config={"force": True})
-            except Exception as e:
-                ctx.err(f"Could not delete document {doc.get('name')}", e)
-
+        # The old copy used to be deleted here, before the upload. The worker now removes it
+        # after the replacement is live, so a re-upload that fails no longer leaves the store
+        # without the document at all.
         await g_db.update_document_async(id, {"error": None, "uploadedAt": None}, user=user)
         g_worker.start()
         while g_worker.running:
@@ -355,6 +1027,9 @@ def install(ctx):
     ctx.add_post("documents/{id}/upload", upload_document)
 
     async def sync_filestore_documents(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
         id = request.match_info["id"]
         user = ctx.get_username(request)
         filestore = g_db.get_filestore(int(id), user=user)
@@ -412,7 +1087,7 @@ def install(ctx):
 
             if not local_doc:
                 local_missing.append(doc)
-                ctx.dbg(f"Remote doc not found locally: ")
+                ctx.dbg(f"Remote doc not found locally: {info}")
                 continue
 
             if not remote_hash or not remote_id:
@@ -553,6 +1228,512 @@ def install(ctx):
         )
 
     ctx.add_post("filestores/{id}/sync", sync_filestore_documents)
+
+    async def prune_filestore(request):
+        """
+        Remove the extra copies of a document a re-index left in Gemini.
+
+        There is no API to replace a document, so an upload only ever adds one. Until the worker
+        learned to delete the copy it supersedes, every push produced a second Gemini document
+        carrying the same content hash - which is what sync reports as DUPLICATE_FILE. A local
+        row can only point at one of them, so the rest are unreachable, still counted against the
+        store, and still returned by search.
+
+        Keeps the newest copy of each hash: that's the one the last upload produced, so it's the
+        one whose metadata is current. The local row is pointed at it, because sync adopts the
+        name of whichever copy it saw last and that may be one about to be deleted.
+
+        `?dryRun=1` reports what it would remove. Nothing local is deleted either way - the
+        document stays exactly where it is, with one copy in Gemini instead of several.
+        """
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        id = int(request.match_info["id"])
+        filestore = g_db.get_filestore(id, user=user)
+        if not filestore or not filestore.get("name"):
+            raise Exception("Filestore does not exist")
+        dry_run = request.query.get("dryRun") not in (None, "", "0", "false")
+
+        by_hash = {}
+        for doc in g_client.file_search_stores.documents.list(parent=filestore.get("name")):
+            doc_hash = next(
+                (m.string_value for m in (doc.custom_metadata or []) if m.key == "hash" and m.string_value),
+                None,
+            )
+            # No hash, no way to tell it apart from a legitimately distinct document. Sync reports
+            # those separately as MISSING_METADATA.
+            if doc_hash:
+                by_hash.setdefault(doc_hash, []).append(doc)
+
+        documents, removed, errors = 0, [], []
+        for doc_hash, copies in by_hash.items():
+            if len(copies) < 2:
+                continue
+            documents += 1
+            copies.sort(key=lambda d: d.create_time.timestamp() if d.create_time else 0, reverse=True)
+            keep, extra = copies[0], copies[1:]
+
+            local = g_db.find_document({"filestoreId": id, "hash": doc_hash}, user=user)
+            if local and local.get("name") != keep.name and not dry_run:
+                g_db.update_document(local.get("id"), {"name": keep.name}, user=user)
+
+            for doc in extra:
+                if dry_run:
+                    removed.append(doc.display_name)
+                    continue
+                try:
+                    g_client.file_search_stores.documents.delete(name=doc.name, config={"force": True})
+                    removed.append(doc.display_name)
+                except Exception as e:
+                    errors.append({"name": doc.name, "error": ctx.error_message(e)})
+
+        if removed and not dry_run:
+            refresh_filestore_stats(id, user=user)
+        ctx.log(f"Prune {'(dry run) ' if dry_run else ''}{filestore.get('displayName')}: "
+                f"{len(removed)} extra copies across {documents} documents")
+        return web.json_response({
+            "dryRun": dry_run,
+            "documents": documents,
+            "removed": len(removed),
+            "samples": removed[:5],
+            "errors": errors,
+        })
+
+    ctx.add_post("filestores/{id}/prune", prune_filestore)
+
+    # --- facets -------------------------------------------------------------------------
+
+    async def filestore_facets(request):
+        """
+        Distinct metadata values with counts, derived from the documents themselves.
+
+        Supersedes /categories (kept as an alias): one endpoint feeds the facet rail, the
+        autocomplete and the coverage strip, so they can't disagree about what values exist.
+        """
+        id = int(request.match_info["id"])
+        user = ctx.get_username(request)
+        fields = request.query.get("fields")
+        fields = [f.strip() for f in fields.split(",") if f.strip()] if fields else None
+        total = g_db.get_filestore_stats(id, user=user) or {}
+        return web.json_response(
+            {
+                "total": total.get("count", 0),
+                "facets": g_db.document_facets(id, fields, user=user),
+            }
+        )
+
+    ctx.add_get("filestores/{id}/facets", filestore_facets)
+
+    # --- bulk metadata ------------------------------------------------------------------
+
+    def bulk_selector(body):
+        """Either {ids:[...]} or {filter:{...}} — the two ways the UI describes a selection."""
+        selector = dict(body.get("filter") or {})
+        if body.get("ids"):
+            selector["ids"] = body["ids"]
+        if not selector:
+            raise Exception("Either 'ids' or 'filter' is required")
+        return selector
+
+    def bulk_change_list(body):
+        """
+        Normalise to a list of {field, op, value}.
+
+        The single-field form is still accepted so a caller editing one field doesn't have to
+        wrap it, but everything downstream sees a list - which is what makes the preview count
+        documents rather than field edits.
+        """
+        changes = body.get("changes")
+        if changes is None:
+            changes = [{"field": body.get("field"), "op": body.get("op", "fill"), "value": body.get("value")}]
+        out = []
+        for c in changes:
+            field = c.get("field")
+            op = c.get("op", "fill")
+            if not field:
+                raise Exception("field is required")
+            if field not in g_db.BULK_COLUMNS:
+                raise Exception(f"'{field}' is not a bulk-editable column")
+            if op not in g_db.BULK_OPS:
+                raise Exception(f"Unknown op '{op}'")
+            out.append({"field": field, "op": op, "value": c.get("value")})
+        if not out:
+            raise Exception("'changes' is required")
+        return out
+
+    async def bulk_documents(request):
+        """
+        Apply metadata changes to many documents at once.
+
+        Writes locally only: the documents become *pending* and Undo is free until a re-index,
+        which is what makes an expensive operation safe to attempt. `dryRun` returns the same
+        counts without writing, produced by the same code that does the work.
+        """
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        body = await request.json()
+        changes = bulk_change_list(body)
+
+        docs = g_db.bulk_select(bulk_selector(body), user=user)
+        preview = g_db.bulk_preview(docs, changes)
+        if body.get("dryRun"):
+            return web.json_response({**preview, "dryRun": True})
+
+        changed = g_db.bulk_update(docs, changes, user=user)
+        return web.json_response({**preview, "changed": len(changed), "ids": changed})
+
+    ctx.add_post("documents/bulk", bulk_documents)
+
+    async def summarise_documents(request):
+        """
+        What a selection currently holds, per field — what the bulk editor shows before you type.
+
+        Answered from the documents themselves rather than from the store-wide facets, which
+        describe the store and so can't say what these 412 documents have in common.
+        """
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        body = await request.json()
+        fields = body.get("fields")
+        docs = g_db.bulk_select(bulk_selector(body), user=user, include_tombstoned=True)
+        return web.json_response(g_db.document_summary(docs, fields))
+
+    ctx.add_post("documents/summary", summarise_documents)
+
+    async def delete_documents(request):
+        """
+        Delete a selection. Unlike a metadata edit this is not undoable, so the client confirms
+        against the count this same selector produces.
+
+        One document failing to delete doesn't abandon the rest - the failures come back named,
+        because the useful answer to "did that work" is "all but these two".
+        """
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        body = await request.json()
+        docs = g_db.bulk_select(bulk_selector(body), user=user, include_tombstoned=True)
+
+        deleted, errors, stores = [], [], set()
+        for row in docs:
+            try:
+                remove_document(row, user=user)
+                deleted.append(row.get("id"))
+                if row.get("filestoreId"):
+                    stores.add(row.get("filestoreId"))
+            except Exception as e:
+                errors.append({
+                    "id": row.get("id"),
+                    "displayName": row.get("displayName"),
+                    "error": ctx.error_message(e),
+                })
+        for filestore_id in stores:
+            refresh_filestore_stats(filestore_id, user=user)
+        return web.json_response({"selected": len(docs), "deleted": len(deleted), "ids": deleted, "errors": errors})
+
+    ctx.add_post("documents/delete", delete_documents)
+
+    async def pending_documents(request):
+        """Documents whose local metadata no longer matches the copy Gemini holds."""
+        user = ctx.get_username(request)
+        filestore_id = request.query.get("filestoreId")
+        rows = g_db.pending_documents(filestore_id, user=user)
+        uploading = g_db.count_documents(
+            {"filestoreId": filestore_id, "null": "uploadedAt,error"}, user=user
+        ) if filestore_id else 0
+        # Break it down by what actually changed. A bare count gives no reason to spend a
+        # re-index; "42 documents have a changed doc_type" is a reason.
+        fields = {}
+        never_pushed = 0
+        for r in rows:
+            if not r.get("customMetadata"):
+                never_pushed += 1
+            for key in g_db_module.metadata_diff_fields(r):
+                fields[key] = fields.get(key, 0) + 1
+        return web.json_response({
+            "count": len(rows),
+            "uploading": uploading,
+            "ids": [r.get("id") for r in rows],
+            "fields": [{"field": k, "count": v} for k, v in sorted(fields.items(), key=lambda kv: -kv[1])],
+            "neverPushed": never_pushed,
+            "worker": g_worker.status(),
+        })
+
+    ctx.add_get("documents/pending", pending_documents)
+
+    async def reindex_documents(request):
+        """
+        Push pending metadata to Gemini. The deliberate, costed step - before this, Undo is free.
+        """
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        id = int(request.match_info["id"])
+        body = await request.json() if request.can_read_body else {}
+        ids = body.get("ids")
+
+        rows = g_db.pending_documents(id, user=user)
+        if ids:
+            wanted = {int(i) for i in ids}
+            rows = [r for r in rows if r.get("id") in wanted]
+
+        for row in rows:
+            # Clearing uploadedAt is what puts it back in the worker's queue. The worker removes
+            # the copy each upload supersedes - an upload on its own only ever adds.
+            await g_db.update_document_async(row.get("id"), {"error": None, "uploadedAt": None}, user=user)
+        g_worker.start()
+        return web.json_response({"queued": len(rows), "ids": [r.get("id") for r in rows]})
+
+    ctx.add_post("filestores/{id}/reindex", reindex_documents)
+
+    async def worker_status(request):
+        return web.json_response(g_worker.status())
+
+    ctx.add_get("worker", worker_status)
+
+    async def cancel_worker(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        g_worker.cancel()
+        return web.json_response(g_worker.status())
+
+    ctx.add_post("worker/cancel", cancel_worker)
+
+    # --- trusted import folders ----------------------------------------------------------
+
+    async def get_import_roots(request):
+        """
+        Which folders non-admins may import from, and whether the caller may change them.
+
+        Readable by anyone who can reach the import UI: the roots are already disclosed by
+        `source-types`, and a caller who cannot see them cannot tell a rejected path from a
+        misconfigured one.
+        """
+        raw, configured = configured_import_roots()
+        return web.json_response({
+            "path": global_config_path(),
+            "configured": configured,
+            "isAdmin": ctx.is_admin(request),
+            "roots": [describe_root(r) for r in raw],
+            # What is in force right now, which is the server default until the file exists.
+            "effective": trusted_import_roots(),
+        })
+
+    ctx.add_get("config/import-roots", get_import_roots)
+
+    async def put_import_roots(request):
+        denied = auth_error(request, "Admin")
+        if denied:
+            return denied
+        body = await request.json() if request.can_read_body else {}
+        roots = body.get("roots")
+        if not isinstance(roots, list):
+            raise Exception("'roots' must be a list of folder paths")
+        cleaned = []
+        for r in roots:
+            r = normalize_root(r)
+            if not r or r in cleaned:
+                continue
+            cleaned.append(r)
+        save_import_roots(cleaned)
+        return web.json_response({
+            "path": global_config_path(),
+            "configured": True,
+            "isAdmin": True,
+            "roots": [describe_root(r) for r in cleaned],
+            "effective": trusted_import_roots(),
+        })
+
+    ctx.add_post("config/import-roots", put_import_roots)
+
+    # --- sources ------------------------------------------------------------------------
+
+    def saved_source_name_conflict(filestore_id, name, user, exclude_id=None):
+        """Return a completed source with the same user-facing name, ignoring case and space."""
+        wanted = str(name or "").strip().casefold()
+        if not wanted:
+            return None
+        return next(
+            (
+                row
+                for row in g_db.query_sources({"filestoreId": int(filestore_id)}, user=user)
+                if row.get("lastRunId")
+                and row.get("id") != exclude_id
+                and str(row.get("name") or "").strip().casefold() == wanted
+            ),
+            None,
+        )
+
+    async def get_source_types(request):
+        """Reports availability so the UI can say 'needs git on PATH' rather than failing later."""
+        types = ingest.source_types()
+        # A path field the user can only satisfy by guessing is a broken field. Ship the roots
+        # assert_source_allowed() will check against - split by where each one comes from, since
+        # "an Admin put this in config" and "the server grants this" are different answers to
+        # "why can I read here" - and say whether this caller is held to them at all.
+        configured, _ = configured_import_roots()
+        for t in types:
+            if t.get("type") == "folder":
+                t["roots"] = {
+                    "trusted": resolve_roots(configured),
+                    "allowed": allowed_directories(),
+                    "all": trusted_import_roots(),
+                }
+                t["unrestricted"] = ctx.is_admin(request)
+        return web.json_response(types)
+
+    ctx.add_get("source-types", get_source_types)
+
+    async def query_sources(request):
+        user = ctx.get_username(request)
+        rows = g_db.query_sources(request.query, user=user)
+        # POST /sources creates a provisional row so the common pipeline has an identity during
+        # preview. It does not become a saved import until a non-dry run completes.
+        rows = [row for row in rows if row.get("lastRunId")]
+        return web.json_response([source_dto(r) for r in rows])
+
+    ctx.add_get("sources", query_sources)
+
+    async def create_source(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        source = await request.json()
+        if not source.get("filestoreId"):
+            raise Exception("filestoreId is required")
+        if source.get("type") not in ingest.SOURCE_TYPES:
+            raise Exception(f"Unknown source type '{source.get('type')}'")
+        if not g_db.get_filestore(int(source["filestoreId"]), user=user):
+            raise Exception("Filestore does not exist")
+        source["name"] = str(source.get("name") or "").strip()
+        if saved_source_name_conflict(source["filestoreId"], source["name"], user):
+            raise Exception(f"A saved import named '{source['name']}' already exists")
+        assert_source_allowed(source, request)
+        source.setdefault("enabled", 1)
+        source.setdefault("onDelete", "tombstone")
+        source.setdefault("extractorVer", ingest.EXTRACTOR_VERSION)
+        id = await g_db.create_source_async(source, user=user)
+        return web.json_response(source_dto(g_db.get_source(id, user=user)))
+
+    ctx.add_post("sources", create_source)
+
+    async def update_source(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        id = int(request.match_info["id"])
+        if not g_db.get_source(id, user=user):
+            raise Exception("Source does not exist")
+        patch = await request.json()
+        patch.pop("id", None)
+        current = g_db.get_source(id, user=user)
+        new_name = str(patch.get("name", current.get("name") or "")).strip()
+        if current.get("lastRunId") and saved_source_name_conflict(
+            current["filestoreId"], new_name, user, exclude_id=id
+        ):
+            raise Exception(f"A saved import named '{new_name}' already exists")
+        if "name" in patch:
+            patch["name"] = new_name
+        assert_source_allowed(patch, request)
+        g_db.update_source(id, patch, user=user)
+        return web.json_response(source_dto(g_db.get_source(id, user=user)))
+
+    ctx.add_patch("sources/{id}", update_source)
+
+    async def delete_source(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        id = int(request.match_info["id"])
+        source = g_db.get_source(id, user=user)
+        if not source:
+            raise Exception("Source does not exist")
+        # `documents=keep` detaches rather than removing: a one-off import deletes its source
+        # once it has run, and the documents it brought in must survive that.
+        if request.query.get("documents", "keep") == "keep":
+            g_db.detach_source_documents(id, user=user)
+        g_db.delete_source(id, user=user)
+        return web.json_response({})
+
+    ctx.add_delete("sources/{id}", delete_source)
+
+    async def source_runs(request):
+        user = ctx.get_username(request)
+        id = int(request.match_info["id"])
+        return web.json_response(
+            [g_db.to_dto(r, ["plan", "log"]) for r in g_db.query_runs(id, user=user)]
+        )
+
+    ctx.add_get("sources/{id}/runs", source_runs)
+
+    async def run_source(request):
+        """
+        Run a source. `dryRun` (the default for a source that has never run) previews what would
+        happen without writing or spending anything.
+        """
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        id = int(request.match_info["id"])
+        source_row = g_db.get_source(id, user=user)
+        if not source_row:
+            raise Exception("Source does not exist")
+        source_row = g_db.to_dto(
+            source_row, ["config", "category", "rules", "include", "exclude", "extract", "chunking", "volatile", "cursor"]
+        )
+        # Re-check on every run, not just at create: otherwise a source an Admin saved becomes a
+        # standing way for anyone else to read that path.
+        assert_source_allowed(source_row, request)
+
+        body = await request.json() if request.can_read_body else {}
+        dry_run = body.get("dryRun", not source_row.get("lastRunId"))
+        if not dry_run and saved_source_name_conflict(
+            source_row["filestoreId"], source_row.get("name"), user, exclude_id=id
+        ):
+            raise Exception(f"A saved import named '{source_row.get('name')}' already exists")
+        result = await run_source_pipeline(source_row, user, dry_run=dry_run, override=body.get("set"),
+                                           confirm_deletes=bool(body.get("confirmDeletes")))
+        return web.json_response(result)
+
+    ctx.add_post("sources/{id}/run", run_source)
+
+    # --- filter capabilities ------------------------------------------------------------
+
+    async def get_capabilities(request):
+        """
+        What `metadata_filter` actually supports here.
+
+        Google documents one filter form (`field="value"`) and delegates the rest to AIP-160, so
+        whether `:` on a stringList, numeric comparison, OR and NOT work is a property of the
+        deployment rather than something to assume. Probing it once and caching the answer lets
+        the filter builder degrade instead of silently returning nothing.
+        """
+        return web.json_response(load_capabilities())
+
+    ctx.add_get("capabilities", get_capabilities)
+
+    async def probe_capabilities(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        result = await asyncio.get_running_loop().run_in_executor(None, run_capability_probe)
+        save_capabilities(result)
+        return web.json_response(result)
+
+    ctx.add_post("capabilities/probe", probe_capabilities)
 
     # Start the upload worker to check for pending uploads
     try:

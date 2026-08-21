@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metadata editor — interaction mockup</title>
+<style>
+  :root {
+    --bg:#f8fafc; --panel:#ffffff; --border:#e2e8f0; --text:#0f172a; --muted:#64748b;
+    --field:#ffffff; --fieldBorder:#cbd5e1; --hover:#f1f5f9;
+    --known:#0d9488; --knownBg:#f0fdfa;
+    --newv:#b45309; --newBg:#fffbeb;
+    --near:#b91c1c; --nearBg:#fef2f2;
+    --accent:#2563eb; --accentBg:#eff6ff;
+  }
+  html.dark {
+    --bg:#0b1220; --panel:#111827; --border:#1f2937; --text:#e5e7eb; --muted:#94a3b8;
+    --field:#0f172a; --fieldBorder:#334155; --hover:#1e293b;
+    --known:#2dd4bf; --knownBg:#042f2e;
+    --newv:#fbbf24; --newBg:#3b2f0b;
+    --near:#f87171; --nearBg:#3f1414;
+    --accent:#60a5fa; --accentBg:#0c1c33;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:820px;margin:0 auto;padding:24px 20px 64px}
+  h1{font-size:18px;margin:0 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 20px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:18px;margin-bottom:16px}
+  .panel h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0 0 14px;font-weight:600}
+  .row{margin-bottom:16px;position:relative}
+  label{display:block;font-size:12px;font-weight:600;margin-bottom:5px}
+  label .hint{font-weight:400;color:var(--muted);margin-left:6px}
+  input[type=text]{width:100%;padding:8px 10px;border-radius:7px;font:inherit;
+    background:var(--field);color:var(--text);border:2px solid var(--fieldBorder);outline:none}
+  input:focus{border-color:var(--accent)}
+  /* the three states */
+  .state-known input{border-color:var(--known);background:var(--knownBg)}
+  .state-new   input{border-color:var(--newv); background:var(--newBg)}
+  .state-near  input{border-color:var(--near); background:var(--nearBg)}
+  .msg{font-size:12px;margin-top:5px;display:flex;align-items:center;gap:6px;min-height:18px}
+  .state-known .msg{color:var(--known)}
+  .state-new   .msg{color:var(--newv)}
+  .state-near  .msg{color:var(--near)}
+  .msg button{font:inherit;font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;cursor:pointer;
+    border:1px solid currentColor;background:transparent;color:inherit}
+  .msg button:hover{background:rgba(127,127,127,.15)}
+  .menu{position:absolute;z-index:20;left:0;right:0;margin-top:3px;background:var(--panel);
+    border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);
+    max-height:210px;overflow:auto;display:none}
+  .menu.open{display:block}
+  .opt{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;cursor:pointer}
+  .opt:hover,.opt.hl{background:var(--hover)}
+  .opt .cnt{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;flex-shrink:0}
+  .opt.create{color:var(--newv);border-top:1px solid var(--border)}
+  .chips{display:flex;flex-wrap:wrap;gap:5px;padding:5px;border-radius:7px;
+    background:var(--field);border:2px solid var(--fieldBorder)}
+  .chips:focus-within{border-color:var(--accent)}
+  .chip{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:5px;font-size:12px;
+    border:1px solid var(--known);color:var(--known);background:var(--knownBg)}
+  .chip.isnew{border-color:var(--newv);color:var(--newv);background:var(--newBg)}
+  .chip b{font-weight:500;font-size:10px;opacity:.75}
+  .chip span{cursor:pointer;opacity:.6;font-weight:700}
+  .chip span:hover{opacity:1}
+  .chips input{border:0;background:transparent;flex:1;min-width:110px;padding:3px;outline:none;color:var(--text);font:inherit}
+  .banner{display:flex;align-items:center;justify-content:space-between;gap:14px;
+    padding:11px 14px;border-radius:8px;border:1px solid var(--newv);background:var(--newBg);
+    color:var(--newv);font-size:13px;margin-bottom:16px}
+  .banner button{font:inherit;font-weight:600;font-size:12px;padding:5px 12px;border-radius:6px;
+    border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer;white-space:nowrap}
+  .banner button:hover{background:rgba(127,127,127,.15)}
+  .cov{display:flex;align-items:center;gap:10px;font-size:12px;padding:5px 0}
+  .cov .name{width:82px;color:var(--muted)}
+  .cov .bar{flex:1;height:5px;border-radius:3px;background:var(--hover);overflow:hidden}
+  .cov .bar i{display:block;height:100%;background:var(--accent)}
+  .cov .pct{width:132px;white-space:nowrap;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+  .cov a{color:var(--accent);text-decoration:none}
+  .cov a:hover{text-decoration:underline}
+  code{background:var(--hover);padding:1px 5px;border-radius:4px;font-size:12px}
+  .filterbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px}
+  .fchip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:14px;font-size:12px;
+    border:1px solid var(--accent);color:var(--accent);background:var(--accentBg)}
+  .fchip span{cursor:pointer;opacity:.6;font-weight:700}
+  .gen{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--muted);
+    background:var(--field);border:1px solid var(--border);border-radius:7px;padding:9px 11px;
+    word-break:break-all;margin-top:4px}
+  .toggle{position:fixed;top:14px;right:16px;font:inherit;font-size:12px;padding:5px 11px;border-radius:6px;
+    border:1px solid var(--border);background:var(--panel);color:var(--text);cursor:pointer}
+  .note{color:var(--muted);font-size:12px;margin:10px 0 0}
+</style>
+</head>
+<body>
+<button class="toggle" onclick="document.documentElement.classList.toggle('dark')">light / dark</button>
+<div class="wrap">
+
+  <h1>Metadata editor</h1>
+  <p class="sub">Interaction mockup — <b>ServiceStack Docs</b> filestore, 1,512 documents.
+     Suggestions and counts come from the values already used in this store.</p>
+
+  <div class="banner">
+    <div><b>47 documents</b> have metadata changes that aren't in Gemini yet.
+         Re-indexing costs one embedding pass per document.</div>
+    <button>Re-index 47</button>
+  </div>
+
+  <div class="panel">
+    <h2>Editing · auth-jwt.md</h2>
+
+    <div class="row" data-field="product">
+      <label>product <span class="hint">— try "ServiceStack", then "Servicestack", then "Acme"</span></label>
+      <input type="text" autocomplete="off" placeholder="Start typing…">
+      <div class="menu"></div>
+      <div class="msg"></div>
+    </div>
+
+    <div class="row" data-field="docType">
+      <label>docType <span class="hint">— try "guides" to see near-match detection</span></label>
+      <input type="text" autocomplete="off" placeholder="Start typing…">
+      <div class="menu"></div>
+      <div class="msg"></div>
+    </div>
+
+    <div class="row" data-field="locale">
+      <label>locale</label>
+      <input type="text" autocomplete="off" placeholder="Start typing…">
+      <div class="menu"></div>
+      <div class="msg"></div>
+    </div>
+
+    <div class="row" data-field="versions">
+      <label>versions <span class="hint">— stringList; Enter to add, try "v9"</span></label>
+      <div class="chips"><input type="text" autocomplete="off" placeholder="Add a version…"></div>
+      <div class="menu"></div>
+      <div class="msg"></div>
+    </div>
+
+    <div class="row" data-field="tags">
+      <label>tags <span class="hint">— stringList; the long-tail escape hatch</span></label>
+      <div class="chips"><input type="text" autocomplete="off" placeholder="Add a tag…"></div>
+      <div class="menu"></div>
+      <div class="msg"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Coverage — what's missing</h2>
+    <div id="coverage"></div>
+    <p class="note">Unpopulated metadata is invisible otherwise. Each row links to the documents
+       missing it, so the panel is a worklist rather than a report.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Querying — facets compose into one filter</h2>
+    <div class="filterbar">
+      <span class="fchip">product = ServiceStack <span>×</span></span>
+      <span class="fchip">versions has v8 <span>×</span></span>
+      <span class="fchip">status = published <span>×</span></span>
+    </div>
+    <div class="gen">product="ServiceStack" AND versions:"v8" AND status="published"</div>
+    <p class="note">Showing the generated expression matters twice over: the grammar beyond
+       <code>=</code> is undocumented, so this is how you debug a filter that returns nothing —
+       and it's what gets pasted into a published assistant's config.</p>
+    <p class="note">Local matches <b>612</b> · Gemini returns <b>598</b> — a gap means documents
+       were edited locally and not yet re-indexed.</p>
+  </div>
+
+</div>
+
+<script>
+// Stands in for GET /filestores/{id}/facets — distinct values with counts, derived by GROUP BY.
+const FACETS = {
+  product:  [["ServiceStack",1180],["ServiceStack.Text",214],["Studio",96],["Locode",22]],
+  docType:  [["guide",612],["reference",498],["api",244],["faq",108],["release-notes",50]],
+  locale:   [["en",1402],["ja",64],["zh",46]],
+  versions: [["v8",900],["v7",742],["v6",410],["v5",120]],
+  tags:     [["security",142],["deprecated",96],["enterprise",44],["needs-review",12]],
+};
+const MULTI = new Set(["versions","tags"]);
+const norm = s => s.trim().toLowerCase().replace(/[\s_-]+/g,"");
+
+// Near-match: same after normalising case/space/punctuation, or one edit away.
+function nearest(field, value) {
+  const v = norm(value); if (!v) return null;
+  let best = null;
+  for (const [cand,count] of FACETS[field]) {
+    const c = norm(cand);
+    if (c === v) continue;
+    const d = c === v ? 0 : lev(c, v);
+    // only flag close calls, and only against values with real usage behind them
+    if (d <= (v.length <= 4 ? 1 : 2) && (!best || count > best.count)) best = {value:cand, count, dist:d};
+  }
+  return best;
+}
+function lev(a,b){
+  const m=[...Array(a.length+1)].map((_,i)=>[i,...Array(b.length).fill(0)]);
+  for(let j=0;j<=b.length;j++) m[0][j]=j;
+  for(let i=1;i<=a.length;i++) for(let j=1;j<=b.length;j++)
+    m[i][j]=Math.min(m[i-1][j]+1,m[i][j-1]+1,m[i-1][j-1]+(a[i-1]===b[j-1]?0:1));
+  return m[a.length][b.length];
+}
+
+document.querySelectorAll('.row').forEach(row => {
+  const field = row.dataset.field;
+  const input = row.querySelector('input');
+  const menu  = row.querySelector('.menu');
+  const msg   = row.querySelector('.msg');
+  const chips = row.querySelector('.chips');
+  let forced = false;   // user explicitly confirmed a brand-new value
+
+  const exact = v => FACETS[field].find(([c]) => c.toLowerCase() === v.trim().toLowerCase());
+
+  function setState(cls){ row.classList.remove('state-known','state-new','state-near'); if(cls) row.classList.add(cls); }
+
+  function commit(value, isNew) {
+    if (!MULTI.has(field)) return;
+    const chip = document.createElement('span');
+    chip.className = 'chip' + (isNew ? ' isnew' : '');
+    const hit = exact(value);
+    chip.innerHTML = `${value}${hit?` <b>${hit[1]}</b>`:' <b>new</b>'} <span>×</span>`;
+    chip.querySelector('span').onclick = () => chip.remove();
+    chips.insertBefore(chip, input);
+    input.value = ''; forced = false; render();
+  }
+
+  function render() {
+    const raw = input.value, v = raw.trim();
+    menu.classList.remove('open'); menu.innerHTML = ''; msg.innerHTML = '';
+    if (!v) { setState(null); return; }
+
+    const hit = exact(v);
+    const near = hit ? null : nearest(field, v);
+
+    // suggestion menu
+    const matches = FACETS[field].filter(([c]) => c.toLowerCase().includes(v.toLowerCase()));
+    matches.forEach(([c,n]) => {
+      const o = document.createElement('div');
+      o.className = 'opt' + (hit && hit[0] === c ? ' hl' : '');
+      o.innerHTML = `<span>${c}</span><span class="cnt">${n.toLocaleString()} docs</span>`;
+      o.onclick = () => { input.value = c; forced = false; MULTI.has(field) ? commit(c,false) : render(); };
+      menu.appendChild(o);
+    });
+    if (!hit) {
+      const o = document.createElement('div');
+      o.className = 'opt create';
+      o.innerHTML = `<span>Add “${v}” as a new value</span><span class="cnt">⌘⏎</span>`;
+      o.onclick = () => { forced = true; MULTI.has(field) ? commit(v,true) : render(); };
+      menu.appendChild(o);
+    }
+    if (menu.children.length) menu.classList.add('open');
+
+    // the three border states
+    if (hit && hit[0] !== v) {
+      // Case/whitespace drift is the most common way a vocabulary splits. Matching
+      // case-insensitively but storing what was typed would create the duplicate this
+      // control exists to prevent, so the canonical value wins and says so.
+      setState('state-known');
+      msg.innerHTML = `✓ Matches <b>&nbsp;${hit[0]}&nbsp;</b> (${hit[1].toLocaleString()} docs) — will be saved with that spelling`;
+    } else if (hit) {
+      setState('state-known');
+      msg.innerHTML = `✓ Existing value — ${hit[1].toLocaleString()} other documents use it`;
+    } else if (near && !forced) {
+      setState('state-near');
+      msg.innerHTML = `⚠ Did you mean <b>&nbsp;${near.value}&nbsp;</b> (${near.count.toLocaleString()} docs)? `;
+      const use = document.createElement('button');
+      use.textContent = `Use “${near.value}”`;
+      use.onclick = () => { input.value = near.value; forced = false; MULTI.has(field)?commit(near.value,false):render(); };
+      const keep = document.createElement('button');
+      keep.textContent = `Keep “${v}”`;
+      keep.onclick = () => { forced = true; render(); };
+      msg.append(use, keep);
+    } else {
+      setState('state-new');
+      msg.innerHTML = `＋ New value — this would be the first document in the store with it`;
+    }
+  }
+
+  input.addEventListener('input', () => { forced = false; render(); });
+  input.addEventListener('focus', render);
+  input.addEventListener('blur', () => setTimeout(() => {
+    menu.classList.remove('open');
+    if (!MULTI.has(field)) { const h = exact(input.value); if (h) { input.value = h[0]; render(); } }
+  }, 160));
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const v = input.value.trim(); if (!v) return;
+      if (e.metaKey || e.ctrlKey) forced = true;               // force the literal typed value
+      const hit = exact(v);
+      if (MULTI.has(field)) commit(hit ? hit[0] : v, !hit);
+      else if (hit) { input.value = hit[0]; render(); }
+      else render();
+    }
+    if (e.key === 'Escape') menu.classList.remove('open');
+  });
+});
+
+// coverage
+const COVERAGE = [["docType",1240,1512],["product",1512,1512],["versions",1104,1512],
+                  ["locale",1512,1512],["status",702,1512],["tags",298,1512]];
+document.getElementById('coverage').innerHTML = COVERAGE.map(([k,have,total]) => {
+  const pct = Math.round(have/total*100), missing = total-have;
+  return `<div class="cov"><span class="name">${k}</span>
+    <span class="bar"><i style="width:${pct}%"></i></span>
+    <span class="pct">${pct}% ${missing ? `· <a href="#">${missing.toLocaleString()} missing</a>` : ''}</span></div>`;
+}).join('');
+</script>
+</body>
+</html>

@@ -42,8 +42,14 @@ To use this extension, you must configure your Gemini API key.
 
 #### Required
 ```bash
+GOOGLE_API_KEY=your_api_key_here
+# or
 GEMINI_API_KEY=your_api_key_here
 ```
+
+Both are checked, with `GOOGLE_API_KEY` taking precedence — matching the `google` provider's
+own precedence, so configuring chat is enough to enable this extension too. If neither is set
+the extension logs `GOOGLE_API_KEY or GEMINI_API_KEY is not configured` and disables itself.
 
 #### Optional
 ```bash
@@ -134,7 +140,7 @@ Fetches current state of all documents from Gemini API.
 
 #### Upload Documents
 ```
-POST /filestores/{id}/upload?category=my_category
+POST /filestores/{id}/upload?category=my_category&sourceUrl=https://docs.acme.com/guide
 Content-Type: multipart/form-data
 
 file: [binary file data]
@@ -146,6 +152,25 @@ Uploads one or more files to the filestore. Documents are:
 2. Saved to cache directory
 3. Added to local database
 4. Queued for background upload to Gemini
+
+`category` and `sourceUrl` can also be sent as **form fields**, in which case they apply to every
+file that follows them in the request until the next one overrides them. This lets a single
+request carry a whole crawl, each page with its own public URL:
+
+```
+POST /filestores/1/upload
+Content-Type: multipart/form-data
+
+category: guides
+sourceUrl: https://docs.acme.com/guides/auth
+file: auth.md
+sourceUrl: https://docs.acme.com/guides/limits
+file: limits.md
+```
+
+`sourceUrl` is the page a reader should be sent to. It's stored on the document, pushed to Gemini
+as custom metadata, and used to link citations — so an answer points at the customer's live docs
+page instead of a download of the cached upload.
 
 #### Query Documents
 ```
@@ -273,12 +298,13 @@ Stores document metadata:
 - `size`: File size in bytes
 - `displayName`: Original filename
 - `name`: Gemini resource name
-- `customMetadata`: JSON metadata (id, hash, category)
+- `customMetadata`: JSON metadata (id, hash, category, sourceUrl)
 - `createTime`, `updateTime`: Gemini timestamps
 - `sizeBytes`: Size reported by Gemini
 - `mimeType`: MIME type
 - `state`: Document state (STATE_PENDING, STATE_ACTIVE, STATE_FAILED, etc.)
 - `category`: User-defined category
+- `sourceUrl`: Public URL this document was published at, used to link citations
 - `tags`: JSON tags
 - `startedAt`, `uploadedAt`: Upload timing
 - `metadata`: JSON metadata
@@ -361,6 +387,32 @@ This extension uses Google's Gemini AI [File Search API](https://ai.google.dev/a
 - Query document status and retrieve results
 
 Once documents are uploaded, they can be referenced in Gemini chat sessions using the `fileSearch` tool, enabling the AI to search through your document collection and provide informed responses based on your content.
+
+### Citations
+
+Every answer grounded in a file search store carries its sources:
+
+- **Inline `[n]` markers** are placed on the sentences they support, using the byte ranges Gemini
+  returns in `groundingSupports`. Clicking one opens that document's `sourceUrl` (falling back to
+  the cached upload). Markers are added at render time — the stored message stays exactly what the
+  model wrote, so copying an answer copies clean text.
+- **A numbered Sources list** under each answer, with an expandable excerpt of the retrieved text.
+
+Sources are attached to the **message** that cited them rather than the thread, so scrolling back
+through a conversation shows each answer with its own documents. They survive streaming: the
+grounding metadata is merged as the response arrives rather than read from a final payload.
+
+A span that can't be placed in the final text — a truncated or cancelled stream, or a response
+split across multiple text parts — is dropped rather than guessed at, so the Sources list is still
+shown but the inline markers for it are not.
+
+## Authentication
+
+Extension routes are not auth-gated by the server, and an anonymous caller resolves to the shared
+(`user IS NULL`) scope. When auth is enabled, the endpoints that mutate state — creating, deleting,
+uploading to, re-uploading and syncing — require a signed-in user and return `401` otherwise.
+Reads are left open, since the null-user scope is the deliberate "shared with everyone here"
+bucket.
 
 ## License
 

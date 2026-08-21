@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bulk metadata — interaction mockup</title>
+<style>
+  :root{--bg:#f8fafc;--panel:#fff;--border:#e2e8f0;--text:#0f172a;--muted:#64748b;--field:#fff;
+    --fieldBorder:#cbd5e1;--hover:#f1f5f9;--known:#0d9488;--knownBg:#f0fdfa;--newv:#b45309;
+    --newBg:#fffbeb;--near:#b91c1c;--accent:#2563eb;--accentBg:#eff6ff;--sel:#dbeafe}
+  html.dark{--bg:#0b1220;--panel:#111827;--border:#1f2937;--text:#e5e7eb;--muted:#94a3b8;--field:#0f172a;
+    --fieldBorder:#334155;--hover:#1e293b;--known:#2dd4bf;--knownBg:#042f2e;--newv:#fbbf24;
+    --newBg:#3b2f0b;--near:#f87171;--accent:#60a5fa;--accentBg:#0c1c33;--sel:#12233d}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  .wrap{max-width:900px;margin:0 auto;padding:24px 20px 220px}
+  h1{font-size:18px;margin:0 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;margin-bottom:14px;overflow:hidden}
+  .phead{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;
+    align-items:center;gap:12px;flex-wrap:wrap}
+  .phead h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0;font-weight:600}
+  .filterbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .fchip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:14px;font-size:12px;
+    border:1px solid var(--accent);color:var(--accent);background:var(--accentBg)}
+  .selall{padding:9px 16px;background:var(--accentBg);border-bottom:1px solid var(--border);
+    font-size:13px;display:none;align-items:center;gap:10px}
+  .selall.show{display:flex}
+  .selall button{font:inherit;font-size:12px;font-weight:600;background:none;border:0;
+    color:var(--accent);cursor:pointer;text-decoration:underline;padding:0}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
+    padding:8px 12px;border-bottom:1px solid var(--border);font-weight:600}
+  td{padding:8px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
+  tr.on td{background:var(--sel)}
+  tr:last-child td{border-bottom:0}
+  .name{font-weight:500}
+  .path{color:var(--muted);font-size:11px}
+  .tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;margin-right:3px;
+    border:1px solid var(--border);color:var(--muted)}
+  .tag.has{border-color:var(--known);color:var(--known);background:var(--knownBg)}
+  .tag.none{border-style:dashed}
+  .tag.will{border-color:var(--newv);color:var(--newv);background:var(--newBg)}
+  input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;margin:0}
+  .bar{position:fixed;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--border);
+    box-shadow:0 -6px 22px rgba(0,0,0,.16);padding:14px 20px;transform:translateY(105%);
+    transition:transform .18s ease}
+  .bar.show{transform:none}
+  .barin{max-width:900px;margin:0 auto;display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap}
+  .ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1;min-width:340px}
+  .ctl label{font-size:11px;color:var(--muted);display:block;margin-bottom:3px;font-weight:600}
+  select,.vin{padding:6px 9px;border-radius:6px;font:inherit;font-size:13px;background:var(--field);
+    color:var(--text);border:2px solid var(--fieldBorder);outline:none}
+  .vin{width:190px}
+  .vin.known{border-color:var(--known);background:var(--knownBg)}
+  .vin.newv{border-color:var(--newv);background:var(--newBg)}
+  .apply{padding:8px 16px;border-radius:7px;font:inherit;font-weight:600;font-size:13px;cursor:pointer;
+    border:0;background:var(--accent);color:#fff}
+  .apply:disabled{opacity:.4;cursor:not-allowed}
+  .ghost{background:none;border:1px solid var(--border);color:var(--text)}
+  .preview{font-size:12px;min-width:270px;border-left:1px solid var(--border);padding-left:20px}
+  .preview div{display:flex;justify-content:space-between;gap:16px;padding:1px 0}
+  .preview .big{font-weight:600;font-size:13px}
+  .preview .cost{color:var(--newv);margin-top:5px;padding-top:5px;border-top:1px solid var(--border)}
+  .preview .free{color:var(--muted)}
+  .banner{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 14px;
+    border-radius:8px;border:1px solid var(--newv);background:var(--newBg);color:var(--newv);
+    font-size:13px;margin-bottom:14px}
+  .banner button{font:inherit;font-weight:600;font-size:12px;padding:5px 12px;border-radius:6px;
+    border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer;white-space:nowrap}
+  .banner .undo{border-color:currentColor;opacity:.85}
+  .note{color:var(--muted);font-size:12px;padding:12px 16px;margin:0;border-top:1px solid var(--border)}
+  .toggle{position:fixed;top:14px;right:16px;font:inherit;font-size:12px;padding:5px 11px;border-radius:6px;
+    border:1px solid var(--border);background:var(--panel);color:var(--text);cursor:pointer;z-index:5}
+  .hint{font-size:11px;color:var(--muted);margin-top:6px}
+</style>
+</head>
+<body>
+<button class="toggle" onclick="document.documentElement.classList.toggle('dark')">light / dark</button>
+<div class="wrap">
+  <h1>Bulk metadata</h1>
+  <p class="sub">Interaction mockup — backfilling <code>docType</code> across the
+    <b>ServiceStack Docs</b> filestore. Select rows, or select everything matching the filter.</p>
+
+  <div class="banner" id="pending" style="display:none">
+    <div id="pendingText"></div>
+    <div style="display:flex;gap:8px">
+      <button class="undo" id="undoBtn">Undo</button>
+      <button id="reindexBtn">Re-index</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="phead">
+      <div class="filterbar">
+        <span class="fchip">category = guides</span>
+        <span class="fchip">product = ServiceStack</span>
+      </div>
+      <h2 id="matchCount">412 documents match</h2>
+    </div>
+
+    <div class="selall" id="selall">
+      <span id="selallText"></span>
+      <button id="selallBtn"></button>
+    </div>
+
+    <table>
+      <thead><tr>
+        <th style="width:34px"><input type="checkbox" id="all"></th>
+        <th>Document</th><th style="width:150px">docType</th><th style="width:120px">status</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="note">Showing 8 of 412 — selection is tracked by id, so it survives paging.</p>
+  </div>
+</div>
+
+<div class="bar" id="bar">
+  <div class="barin">
+    <div class="ctl">
+      <div>
+        <label>Field</label>
+        <select id="field">
+          <option value="docType">docType</option>
+          <option value="status">status</option>
+          <option value="tags">tags (list)</option>
+        </select>
+      </div>
+      <div>
+        <label>Operation</label>
+        <select id="mode"></select>
+      </div>
+      <div>
+        <label>Value</label>
+        <input class="vin" id="value" list="vals" placeholder="guide" value="guide" autocomplete="off">
+        <datalist id="vals"></datalist>
+      </div>
+      <div style="align-self:flex-end;display:flex;gap:8px">
+        <button class="apply" id="applyBtn">Apply</button>
+        <button class="apply ghost" id="clearBtn">Clear selection</button>
+      </div>
+      <div class="hint" id="hint"></div>
+    </div>
+
+    <div class="preview" id="preview"></div>
+  </div>
+</div>
+
+<script>
+const FACETS = { docType:[["guide",612],["reference",498],["api",244],["faq",108]],
+                 status:[["published",702],["draft",64],["deprecated",41]],
+                 tags:[["security",142],["deprecated",96],["enterprise",44]] };
+const MULTI = new Set(["tags"]);
+const MODES = {
+  single:[["fill","Set where empty"],["set","Set (overwrite)"],["clear","Clear"]],
+  multi: [["add","Add to list"],["remove","Remove from list"],["set","Replace list"]],
+};
+
+// 8 visible rows standing in for 412; the off-page remainder is modelled in aggregate
+// so the preview maths is real rather than decorative.
+const DOCS = [
+  {id:1, name:"auth-jwt.md",        path:"guides/auth/",     docType:"guide",     status:"published"},
+  {id:2, name:"auth-apikeys.md",    path:"guides/auth/",     docType:null,        status:"published"},
+  {id:3, name:"caching.md",         path:"guides/perf/",     docType:null,        status:null},
+  {id:4, name:"redis-cache.md",     path:"guides/perf/",     docType:"reference", status:"published"},
+  {id:5, name:"validation.md",      path:"guides/api/",      docType:null,        status:null},
+  {id:6, name:"autoquery-intro.md", path:"guides/api/",      docType:"guide",     status:"published"},
+  {id:7, name:"deploy-docker.md",   path:"guides/deploy/",   docType:null,        status:"draft"},
+  {id:8, name:"deploy-aws.md",      path:"guides/deploy/",   docType:null,        status:null},
+];
+// aggregate stand-in for the 404 documents not on this page
+const OFFPAGE = {count:404, docType:{empty:264, other:88, same:52}, status:{empty:210, other:34, same:160}};
+
+let selected = new Set();
+let selectAllMatching = false;
+let pending = 0;
+
+const $ = s => document.querySelector(s);
+const fieldEl=$('#field'), modeEl=$('#mode'), valEl=$('#value');
+
+function isMulti(){ return MULTI.has(fieldEl.value) }
+function fillModes(){
+  const modes = MODES[isMulti() ? 'multi' : 'single'];
+  modeEl.innerHTML = modes.map(([v,l])=>`<option value="${v}">${l}</option>`).join('');
+}
+function fillVals(){
+  $('#vals').innerHTML = FACETS[fieldEl.value].map(([v,n])=>`<option value="${v}">${n} docs</option>`).join('');
+}
+
+function renderRows(){
+  $('#rows').innerHTML = DOCS.map(d=>{
+    const on = selected.has(d.id);
+    const cell = (f) => d[f]
+      ? `<span class="tag has">${d[f]}</span>`
+      : `<span class="tag none">—</span>`;
+    return `<tr class="${on?'on':''}" data-id="${d.id}">
+      <td><input type="checkbox" ${on?'checked':''}></td>
+      <td><div class="name">${d.name}</div><div class="path">${d.path}</div></td>
+      <td>${cell('docType')}</td><td>${cell('status')}</td></tr>`;
+  }).join('');
+  $('#rows').querySelectorAll('tr').forEach(tr=>{
+    tr.querySelector('input').onchange = e => {
+      const id = +tr.dataset.id;
+      e.target.checked ? selected.add(id) : selected.delete(id);
+      selectAllMatching = false; sync();
+    };
+  });
+}
+
+// What the operation would actually do — split into "changes" vs "already correct",
+// because only the first costs a re-index.
+function effect(){
+  const f = fieldEl.value, mode = modeEl.value, v = valEl.value.trim();
+  let change=0, same=0, skipped=0;
+
+  const applies = (cur) => {
+    if (mode==='clear')  return cur ? 'change' : 'same';
+    if (!v)              return 'same';
+    if (mode==='fill')   return cur ? 'skipped' : 'change';
+    if (mode==='set')    return cur === v ? 'same' : 'change';
+    if (mode==='add')    return 'change';
+    if (mode==='remove') return 'change';
+    return 'change';
+  };
+
+  DOCS.filter(d=>selected.has(d.id)).forEach(d=>{
+    const r = applies(d[f]);
+    r==='change' ? change++ : r==='skipped' ? skipped++ : same++;
+  });
+
+  if (selectAllMatching) {
+    const a = OFFPAGE[f] || {empty:0,other:0,same:0};
+    if (mode==='fill')      { change += a.empty; skipped += a.other + a.same; }
+    else if (mode==='clear'){ change += a.other + a.same; same += a.empty; }
+    else if (mode==='set')  { change += a.empty + a.other; same += a.same; }
+    else                    { change += a.count || (a.empty+a.other+a.same); }
+  }
+  return {change, same, skipped, total:change+same+skipped};
+}
+
+function sync(){
+  const n = selectAllMatching ? 412 : selected.size;
+  $('#bar').classList.toggle('show', n>0);
+  $('#all').checked = selected.size===DOCS.length;
+
+  // page fully ticked -> offer the rest of the filtered set
+  const full = selected.size===DOCS.length;
+  $('#selall').classList.toggle('show', full);
+  if (full) {
+    $('#selallText').textContent = selectAllMatching
+      ? `All 412 documents matching this filter are selected.`
+      : `All 8 documents on this page are selected.`;
+    $('#selallBtn').textContent = selectAllMatching
+      ? 'Select only this page' : 'Select all 412 matching this filter';
+  }
+
+  const e = effect();
+  const mins = Math.max(1, Math.round(e.change/60));
+  $('#preview').innerHTML = `
+    <div><span>Selected</span><span class="big">${n.toLocaleString()}</span></div>
+    <div><span>Will change</span><span class="big" style="color:var(--newv)">${e.change.toLocaleString()}</span></div>
+    ${e.skipped?`<div class="free"><span>Already set — skipped</span><span>${e.skipped.toLocaleString()}</span></div>`:''}
+    ${e.same?`<div class="free"><span>Already this value</span><span>${e.same.toLocaleString()}</span></div>`:''}
+    <div class="cost"><span>Re-index cost</span><span>${e.change.toLocaleString()} embed · ~${mins} min</span></div>`;
+
+  $('#applyBtn').disabled = e.change===0;
+  $('#applyBtn').textContent = e.change ? `Apply to ${e.change.toLocaleString()}` : 'No changes';
+
+  // value box reuses the match/new signal from the single-doc editor
+  const hit = FACETS[fieldEl.value].find(([c])=>c.toLowerCase()===valEl.value.trim().toLowerCase());
+  valEl.classList.toggle('known', !!hit && modeEl.value!=='clear');
+  valEl.classList.toggle('newv', !hit && !!valEl.value.trim() && modeEl.value!=='clear');
+  valEl.disabled = modeEl.value==='clear';
+
+  $('#hint').textContent = modeEl.value==='fill'
+    ? 'Documents that already have a value are left alone — no needless re-indexing, no curated data overwritten.'
+    : modeEl.value==='set' ? 'Overwrites existing values. Every changed document is re-indexed.'
+    : modeEl.value==='clear' ? 'Clears the field. Still a re-index, because the stored copy must change.'
+    : '';
+}
+
+$('#all').onchange = e => {
+  selected = e.target.checked ? new Set(DOCS.map(d=>d.id)) : new Set();
+  selectAllMatching = false; renderRows(); sync();
+};
+$('#selallBtn').onclick = () => { selectAllMatching = !selectAllMatching; sync(); };
+$('#clearBtn').onclick = () => { selected=new Set(); selectAllMatching=false; renderRows(); sync(); };
+fieldEl.onchange = () => { fillModes(); fillVals(); valEl.value = FACETS[fieldEl.value][0][0]; sync(); };
+modeEl.onchange = sync;
+valEl.oninput = sync;
+
+$('#applyBtn').onclick = () => {
+  const e = effect();
+  pending += e.change;
+  // Local write only. The pending queue is the undo buffer: nothing has reached Gemini yet.
+  $('#pending').style.display='flex';
+  $('#pendingText').innerHTML =
+    `<b>${pending.toLocaleString()} documents</b> changed locally and not yet in Gemini. `+
+    `Undo is free until you re-index.`;
+  selected=new Set(); selectAllMatching=false; renderRows(); sync();
+};
+$('#undoBtn').onclick = () => { pending=0; $('#pending').style.display='none'; };
+$('#reindexBtn').onclick = () => {
+  $('#pendingText').innerHTML = `Re-indexing <b>${pending.toLocaleString()}</b> documents — 128 done, 12 failed. `+
+    `<a href="#" style="color:inherit">Retry failed</a>`;
+  $('#undoBtn').style.display='none'; $('#reindexBtn').textContent='Cancel';
+};
+
+fillModes(); fillVals(); renderRows(); sync();
+</script>
+</body>
+</html>

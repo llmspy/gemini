@@ -98,6 +98,111 @@ is a prefix under which the folder's own structure is preserved.
 
 ## Importing a folder
 
+### Staging a website crawl
+
+The **Web crawl** import tab converts a website into an inspectable folder before anything is
+sent to Gemini. Enter a start URL and the folder name is pre-populated from its host. Ports use a
+dash, so `http://localhost:5000` becomes `localhost-5000`. You can override the name before the
+crawl starts.
+
+Crawls are private to the current user and are stored beneath:
+
+```text
+users/<user>/gemini/imports/<domain>/
+```
+
+Ordinary page URLs are written as clean Markdown paths: `/docs/templates/next-rsc` becomes
+`docs/templates/next-rsc.md`. The site root is written to `index.md`, while URLs ending in `/` use
+an `index.md` in that directory (`/docs/` becomes `docs/index.md`). Each file starts with frontmatter
+containing its title, public source URL, path, query string, meta description and any page tags.
+URLs that differ only by query string receive a stable suffix so they cannot overwrite one another.
+
+Saved crawl imports remain listed in the Web crawl tab. Select one to edit and apply its ordered
+regular-expression transforms. **Import this folder** then switches to the Folder tab, fills its
+path, and loads the workspace metadata ready for Preview Import.
+
+### Controlling what is crawled
+
+The Web crawl form provides the common safety controls directly:
+
+- **Include paths** and **Exclude paths** use the same glob syntax as folder imports. A crawl
+  started at `/docs/` is also confined to that path, so `/docs-private/` is not accidentally
+  included.
+- **Query strings** defaults to Ignore. Allow selected retains only named parameters; Include all
+  retains every parameter except common tracking/session parameters. Query keys are sorted before
+  deduplication and each path is limited to five variants by default.
+- **Max depth** limits link traversal and **Max pages** limits saved documents. A separate request
+  ceiling prevents a large set of follow-only pages from bypassing the page limit.
+- Crawls are same-origin by default. **Additional hosts** permits named supporting hosts without
+  opening the crawler to arbitrary external links.
+- `robots.txt`, page `noindex`/`nofollow`, link `rel=nofollow`, canonical URLs, HTML content types,
+  and duplicate extracted content are handled by default. Each behavior can be changed in the
+  crawl form or its saved manifest.
+
+Advanced ordered rules support `exclude` (do not fetch or follow) and `followOnly` (discover its
+links but do not write a Markdown file). The first matching rule wins. The Web crawl tab renders these
+rules from the server's JSON Schema, with separate Path rule and Query-string rule forms:
+
+```json
+{
+  "crawl": {
+    "include": ["/docs/**"],
+    "exclude": ["/docs/archives/**", "/account/**", "/search/**"],
+    "query": {
+      "mode": "allow",
+      "allow": ["version", "lang"],
+      "exclude": ["utm_*", "fbclid", "gclid", "ref", "session", "token"],
+      "maxVariantsPerPath": 5
+    },
+    "maxDepth": 10,
+    "maxPages": 500,
+    "sameOrigin": true,
+    "allowedHosts": ["cdn.example.org"],
+    "respectRobots": true,
+    "respectNoIndex": true,
+    "followNoFollow": false,
+    "useCanonical": true,
+    "dedupeContent": true,
+    "contentTypes": ["text/html"],
+    "rules": [
+      { "match": "/docs/sitemap/**", "action": "followOnly" },
+      { "queryString": true, "action": "exclude" }
+    ]
+  }
+}
+```
+
+### `import.json`
+
+A folder or ZIP may contain `import.json` manifests. The root manifest supplies the global import
+configuration; a manifest in a subdirectory inherits it and overwrites metadata for files below
+that directory. Page frontmatter is more specific and overwrites inherited defaults. Metadata
+entered explicitly in the Import UI has the highest precedence.
+
+```json
+{
+  "version": 1,
+  "metadata": {
+    "defaults": { "product": "ServiceStack", "tags": ["docs"] },
+    "rules": [
+      { "match": "auth/**/*.md", "set": { "tags": ["auth"] } }
+    ]
+  },
+  "transforms": [
+    {
+      "match": "**/*.md",
+      "pattern": "\\nEdit this page.*$",
+      "replacement": "",
+      "flags": "gim"
+    }
+  ]
+}
+```
+
+When no metadata has been entered, Preview Import automatically loads the root `import.json`.
+Saving a folder as a recurring import writes its effective metadata back to the root manifest
+atomically, preserving its crawl and transform configuration.
+
 The **Folder** tab scans a directory on the machine running llms.py. It is useful for documentation
 repositories and other collections you want to preview and re-run as they change.
 

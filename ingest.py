@@ -38,7 +38,7 @@ BINARY_DOC_EXTS = {"pdf", "docx", "pptx", "xlsx"}
 
 DEFAULT_EXCLUDES = [
     "**/.git/**", "**/node_modules/**", "**/__pycache__/**", "**/.venv/**", "**/venv/**",
-    "**/dist/**", "**/build/**", "**/.DS_Store", "**/*.lock", "**/.*/**",
+    "**/dist/**", "**/build/**", "**/.DS_Store", "**/*.lock", "**/.*/**", "**/import.json",
 ]
 
 MIN_WORDS_DEFAULT = 25
@@ -637,6 +637,30 @@ class FolderSource(Source):
         with open(item.handle, "rb") as f:
             return f.read()
 
+    def rules_for(self, item, base_rules):
+        # Imported lazily to avoid making the generic extractor depend on the crawler module.
+        configured = self.config.get("path")
+        if not configured:
+            return base_rules
+        root = os.path.abspath(os.path.expanduser(configured))
+        rel_dir = posixpath.dirname(item.key)
+        candidates = [os.path.join(root, "import.json")]
+        current = root
+        for part in [p for p in rel_dir.split("/") if p]:
+            current = os.path.join(current, part)
+            candidates.append(os.path.join(current, "import.json"))
+        if not any(os.path.isfile(path) for path in candidates):
+            return base_rules
+        try:
+            from . import crawl
+        except ImportError:  # standalone extension tests load ingest.py outside its package
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("gemini_crawl", os.path.join(os.path.dirname(__file__), "crawl.py"))
+            crawl = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(crawl)
+        manifest = crawl.effective_manifest(root, item.key)
+        return crawl.merge_metadata(manifest.get("metadata"), base_rules)
+
 
 class ZipSource(Source):
     type = "zip"
@@ -679,6 +703,31 @@ class ZipSource(Source):
     def fetch(self, item):
         with self._open().open(item.handle) as f:
             return f.read()
+
+    def rules_for(self, item, base_rules):
+        zf = self._open()
+        key = item.key.replace("\\", "/").lstrip("/")
+        directories = [""]
+        current = ""
+        for part in [p for p in posixpath.dirname(key).split("/") if p]:
+            current = posixpath.join(current, part)
+            directories.append(current)
+        merged = {}
+        try:
+            from . import crawl
+        except ImportError:
+            return base_rules
+        names = set(zf.namelist())
+        for directory in directories:
+            manifest = posixpath.join(directory, "import.json") if directory else "import.json"
+            if manifest not in names:
+                continue
+            try:
+                cfg = json.loads(zf.read(manifest).decode("utf-8"))
+                merged = crawl.merge_metadata(merged, cfg.get("metadata"))
+            except Exception as e:
+                raise ValueError(f"Invalid {manifest}: {e}") from e
+        return crawl.merge_metadata(merged, base_rules)
 
     def close(self):
         if self._zip:
@@ -803,7 +852,8 @@ def build_plan(source_row, source, existing, override=None, on_progress=None):
             plan.skipped.append({"sourceKey": key, "reason": skip})
             continue
 
-        meta, matched = derive_metadata(key, rules, front, item.native, override)
+        item_rules = source.rules_for(item, rules) if hasattr(source, "rules_for") else rules
+        meta, matched = derive_metadata(key, item_rules, front, item.native, override)
         if meta is None:
             plan.skipped.append({"sourceKey": key, "reason": "excluded by rule"})
             continue
@@ -824,7 +874,7 @@ def build_plan(source_row, source, existing, override=None, on_progress=None):
 
         entry = {
             "sourceKey": key,
-            "displayName": item.title,
+            "displayName": front.get("title") or item.title,
             "size": len(raw),
             "text": text,
             "contentHash": c_hash,

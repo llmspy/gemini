@@ -14,6 +14,7 @@ from google import genai
 from google.genai.errors import ClientError
 
 from . import ingest
+from . import crawl
 from . import db as g_db_module
 from .db import GeminiDB, category_ancestors
 from .upload_worker import UploadWorker
@@ -253,6 +254,11 @@ def install(ctx):
         if not path:
             return
         if request is not None and ctx.is_admin(request):
+            return
+        # Crawl workspaces are created by this extension inside the caller's own user folder.
+        # They are always a valid source for that same caller, regardless of deployment roots.
+        user_imports = crawl.imports_root(ctx, ctx.get_username(request) if request is not None else None)
+        if ingest.within_roots(path, [user_imports]):
             return
         roots = trusted_import_roots()
         if not roots:
@@ -727,6 +733,9 @@ def install(ctx):
         return sha256_hash, save_filename, f"/~cache/{relative_path}"
 
     def expand_zip(content, base_category):
+        return expand_zip_with_metadata(content, base_category)
+
+    def expand_zip_with_metadata(content, base_category, override_metadata=None):
         """
         Turn an uploaded archive into the documents inside it.
 
@@ -735,6 +744,13 @@ def install(ctx):
         wrapper directory (what every GitHub "Download ZIP" produces) is stripped so categories
         don't all start with `repo-main/`.
         """
+        def merge_rules(parent, child):
+            parent, child = parent or {}, child or {}
+            return {
+                "defaults": {**(parent.get("defaults") or {}), **(child.get("defaults") or {})},
+                "rules": [*(parent.get("rules") or []), *(child.get("rules") or [])],
+            }
+
         def keep(name):
             key = name.replace("\\", "/").lstrip("/")
             return not ("__MACOSX/" in key or ingest.matches_any(key, ingest.DEFAULT_EXCLUDES))
@@ -746,6 +762,21 @@ def install(ctx):
             names = [i.filename for i in zf.infolist() if not i.is_dir() and keep(i.filename)]
             tops = {n.split("/", 1)[0] for n in names if "/" in n}
             wrapper = next(iter(tops)) if len(tops) == 1 and all("/" in n for n in names) else None
+
+            normalized = {}
+            for info in zf.infolist():
+                key = info.filename.replace("\\", "/").lstrip("/")
+                if wrapper and key.startswith(wrapper + "/"):
+                    key = key[len(wrapper) + 1 :]
+                normalized[key] = info
+
+            manifests = {}
+            for key, info in normalized.items():
+                if key == "import.json" or key.endswith("/import.json"):
+                    try:
+                        manifests[posixpath.dirname(key)] = json.loads(zf.read(info.filename).decode("utf-8"))
+                    except Exception as e:
+                        raise Exception(f"Invalid {key}: {e}") from e
 
             for info in zf.infolist():
                 if info.is_dir() or not keep(info.filename):
@@ -760,7 +791,7 @@ def install(ctx):
                 # Same extraction the ingest pipeline uses, so a zip and a folder of the same
                 # content produce identical documents. An unsupported type (a PDF) is passed
                 # through as-is for Gemini to handle rather than dropped.
-                text, _front, skip = ingest.extract(raw, key)
+                text, front, skip = ingest.extract(raw, key)
                 if skip and skip.startswith("unsupported"):
                     payload, name = raw, key
                 elif skip:
@@ -771,12 +802,19 @@ def install(ctx):
                     name = key[:-len(key.split(".")[-1]) - 1] + ".md" if key.lower().endswith((".html", ".htm")) else key
 
                 folder = posixpath.dirname(key)
+                inherited = {}
+                current = ""
+                for directory in ["", *[posixpath.join(*folder.split("/")[:i]) for i in range(1, len(folder.split("/")) + 1) if folder]]:
+                    cfg = manifests.get(directory) or {}
+                    inherited = merge_rules(inherited, cfg.get("metadata"))
+                page_meta, _ = ingest.derive_metadata(key, inherited, front, override=override_metadata)
                 parts = [p for p in (base_category, folder) if p]
                 entries.append({
                     "key": key,
-                    "displayName": posixpath.basename(name),
+                    "displayName": front.get("title") or posixpath.basename(name),
                     "content": payload,
                     "category": "/".join(parts) or None,
+                    "metadata": page_meta or {},
                 })
         return entries
 
@@ -823,7 +861,7 @@ def install(ctx):
             content = await field.read()
 
             if filename.lower().endswith(".zip"):
-                entries = expand_zip(content, category)
+                entries = expand_zip_with_metadata(content, category, meta)
                 ctx.log(f"Expanded {filename} into {len(entries)} document(s)")
             else:
                 entries = [{"key": filename, "displayName": filename, "content": content,
@@ -848,7 +886,7 @@ def install(ctx):
                     ),
                     "error": None,
                     "uploadedAt": None,
-                    **meta,
+                    **entry.get("metadata", meta),
                 }
                 # Uploads don't run through build_plan, so the same expansion has to happen here
                 # or a `{category}/{name}` template would be stored with its braces intact.
@@ -1583,15 +1621,99 @@ def install(ctx):
         configured, _ = configured_import_roots()
         for t in types:
             if t.get("type") == "folder":
+                user_imports = crawl.imports_root(ctx, ctx.get_username(request))
                 t["roots"] = {
                     "trusted": resolve_roots(configured),
                     "allowed": allowed_directories(),
-                    "all": trusted_import_roots(),
+                    "imports": [user_imports],
+                    "all": sorted(set(trusted_import_roots()) | {user_imports}),
                 }
                 t["unrestricted"] = ctx.is_admin(request)
         return web.json_response(types)
 
     ctx.add_get("source-types", get_source_types)
+
+    # --- staged web imports -------------------------------------------------------------
+
+    async def list_crawl_imports(request):
+        return web.json_response(crawl.list_imports(ctx, ctx.get_username(request)))
+
+    ctx.add_get("imports", list_crawl_imports)
+
+    async def crawl_import_schema(request):
+        return web.json_response({"rules": crawl.CRAWL_RULE_SCHEMA, "transforms": crawl.TRANSFORM_SCHEMA})
+
+    # Register static paths before /imports/{name} so aiohttp cannot treat "schema" as a name.
+    ctx.add_get("imports/schema", crawl_import_schema)
+
+    async def get_crawl_import(request):
+        name = request.match_info["name"]
+        path = crawl.workspace_path(ctx, ctx.get_username(request), name)
+        if not os.path.isdir(path):
+            raise Exception("Import does not exist")
+        cfg = crawl.read_json(os.path.join(path, crawl.MANIFEST))
+        pages = len(crawl.list_crawled_pages(path))
+        return web.json_response({"name": name, "path": path, "pages": pages, "config": cfg})
+
+    ctx.add_get("imports/{name}", get_crawl_import)
+
+    async def list_crawl_pages(request):
+        name = request.match_info["name"]
+        path = crawl.workspace_path(ctx, ctx.get_username(request), name)
+        return web.json_response({"pages": crawl.list_crawled_pages(path)})
+
+    ctx.add_get("imports/{name}/pages", list_crawl_pages)
+
+    async def get_crawl_page(request):
+        name = request.match_info["name"]
+        path = crawl.workspace_path(ctx, ctx.get_username(request), name)
+        try:
+            content = crawl.read_crawled_page(path, request.query.get("path"))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({"path": request.query.get("path"), "content": content})
+
+    ctx.add_get("imports/{name}/page", get_crawl_page)
+
+    async def start_crawl(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        result = await crawl.crawl_site(ctx, ctx.get_username(request), await request.json())
+        return web.json_response(result)
+
+    ctx.add_post("imports/crawl", start_crawl)
+
+    async def save_crawl_config(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        name = request.match_info["name"]
+        path = crawl.workspace_path(ctx, ctx.get_username(request), name)
+        if not os.path.isdir(path):
+            raise Exception("Import does not exist")
+        cfg = await request.json()
+        crawl.write_json(os.path.join(path, crawl.MANIFEST), cfg)
+        return web.json_response({"name": name, "path": path, "config": cfg})
+
+    ctx.add_put("imports/{name}", save_crawl_config)
+
+    async def transform_crawl_import(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        name = request.match_info["name"]
+        path = crawl.workspace_path(ctx, ctx.get_username(request), name)
+        cfg_path = os.path.join(path, crawl.MANIFEST)
+        cfg = crawl.read_json(cfg_path)
+        body = await request.json()
+        transforms = body.get("transforms", cfg.get("transforms") or [])
+        changed = crawl.apply_transforms(path, transforms)
+        cfg["transforms"] = transforms
+        crawl.write_json(cfg_path, cfg)
+        return web.json_response({"name": name, "path": path, "changed": changed, "config": cfg})
+
+    ctx.add_post("imports/{name}/transform", transform_crawl_import)
 
     async def query_sources(request):
         user = ctx.get_username(request)
@@ -1706,6 +1828,11 @@ def install(ctx):
             raise Exception(f"A saved import named '{source_row.get('name')}' already exists")
         result = await run_source_pipeline(source_row, user, dry_run=dry_run, override=body.get("set"),
                                            confirm_deletes=bool(body.get("confirmDeletes")))
+        if (not dry_run and body.get("saveConfig") and source_row.get("type") == "folder"
+                and (source_row.get("config") or {}).get("metadataSpecified")):
+            path = (source_row.get("config") or {}).get("path")
+            if path:
+                crawl.save_metadata(path, source_row.get("rules") or {})
         return web.json_response(result)
 
     ctx.add_post("sources/{id}/run", run_source)

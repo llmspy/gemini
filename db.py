@@ -1,9 +1,9 @@
-import contextlib
 import json
 import os
 import struct
 from datetime import datetime
 from typing import Any, Dict
+from urllib.parse import urlsplit
 
 from llms.db import DbManager, order_by, select_columns, to_dto, valid_columns
 
@@ -189,6 +189,30 @@ def to_ints(ints):
     return ret
 
 
+def referrer_domain(origin=None, page_url=None):
+    """Return a normalized host (including a meaningful port) from stored browser URLs."""
+    for value in (origin, page_url):
+        value = str(value or "").strip()
+        if not value or value.lower() == "null":
+            continue
+        try:
+            parsed = urlsplit(value if "://" in value else f"//{value}")
+            host = (parsed.hostname or "").lower()
+            if not host:
+                continue
+            port = parsed.port
+            if ":" in host:
+                host = f"[{host}]"
+            return f"{host}:{port}" if port is not None else host
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def timestamp_text(value):
+    return value.isoformat() if isinstance(value, datetime) else value
+
+
 class GeminiDB:
     def __init__(self, ctx, db_path=None, clone=None):
         if db_path is None:
@@ -271,6 +295,42 @@ class GeminiDB:
                 "log": "JSON",
                 "error": "TEXT",
             },
+            "assistant": {
+                "id": "INTEGER",
+                "filestoreId": "INTEGER",
+                "user": "TEXT",
+                "createdAt": "TIMESTAMP",
+                "updatedAt": "TIMESTAMP",
+                "name": "TEXT",
+                "publicId": "TEXT",
+                "enabled": "INTEGER",
+                "publishedAt": "TIMESTAMP",
+                "config": "JSON",
+            },
+            "assistant_conversation": {
+                "id": "INTEGER",
+                "assistantId": "INTEGER",
+                "user": "TEXT",
+                "createdAt": "TIMESTAMP",
+                "updatedAt": "TIMESTAMP",
+                "sessionId": "TEXT",
+                "origin": "TEXT",
+                "pageUrl": "TEXT",
+                "userAgent": "TEXT",
+                "title": "TEXT",
+                "status": "TEXT",
+                "messageCount": "INTEGER",
+                "lastMessage": "TEXT",
+            },
+            "assistant_message": {
+                "id": "INTEGER",
+                "conversationId": "INTEGER",
+                "createdAt": "TIMESTAMP",
+                "role": "TEXT",
+                "content": "TEXT",
+                "citations": "JSON",
+                "error": "TEXT",
+            },
             "document": {
                 "id": "INTEGER",
                 "filestoreId": "INTEGER",
@@ -321,8 +381,12 @@ class GeminiDB:
             },
         }
         if not clone:
-            with self.db.create_writer_connection() as conn:
+            conn = self.db.create_writer_connection()
+            try:
                 self.init_db(conn)
+                conn.commit()
+            finally:
+                conn.close()
 
     def clone(self):
         return GeminiDB(self.ctx, self.db_path, clone=self)
@@ -373,11 +437,8 @@ class GeminiDB:
         sql_columns = ",".join(
             [f"{col} {overrides.get(col, dtype)}" for col, dtype in self.columns["document"].items()]
         )
-        # New databases get the table without the old UNIQUE(filestoreId,hash); existing ones are
-        # rebuilt by migrate_document_identity() below.
         self.db.exec(conn, f"CREATE TABLE IF NOT EXISTS document ({sql_columns})")
         self.add_missing_columns(conn, "document")
-        self.migrate_document_identity(conn)
         self.db.exec(conn, "CREATE INDEX IF NOT EXISTS idx_document_user ON document(user)")
         self.db.exec(
             conn,
@@ -386,69 +447,26 @@ class GeminiDB:
         self.db.exec(conn, "CREATE INDEX IF NOT EXISTS idx_document_filestore ON document(filestoreId)")
         self.db.exec(conn, "CREATE INDEX IF NOT EXISTS idx_document_source ON document(sourceId)")
         self.db.exec(conn, "CREATE INDEX IF NOT EXISTS idx_document_category ON document(filestoreId,category)")
-        # Identity is (store, source, key) - see migrate_document_identity for why this replaced
-        # a UNIQUE(filestoreId,hash) table constraint.
+        # Identity is the document's stable key within its source and store.
         self.db.exec(
             conn,
             "CREATE UNIQUE INDEX IF NOT EXISTS uniq_document_source_key "
             "ON document(filestoreId, IFNULL(sourceId,0), sourceKey) WHERE sourceKey IS NOT NULL",
         )
 
-        for table in ("source", "source_run"):
+        for table in ("source", "source_run", "assistant", "assistant_conversation", "assistant_message"):
             cols = ",".join([f"{col} {overrides.get(col, dtype)}" for col, dtype in self.columns[table].items()])
             self.db.exec(conn, f"CREATE TABLE IF NOT EXISTS {table} ({cols})")
             self.add_missing_columns(conn, table)
         self.db.exec(conn, "CREATE INDEX IF NOT EXISTS idx_source_filestore ON source(filestoreId)")
         self.db.exec(conn, "CREATE INDEX IF NOT EXISTS idx_source_run_source ON source_run(sourceId)")
-
-    def migrate_document_identity(self, conn):
-        """
-        Drop the legacy `UNIQUE (filestoreId, hash)` table constraint.
-
-        Content hash is a change *detector*, not an identity: the same bytes legitimately appear at
-        more than one source key - a shared LICENSE.md in two folders, one boilerplate page under
-        two sections - and under the old constraint the second one silently failed to insert.
-        Identity is now (filestoreId, sourceId, sourceKey), enforced by a unique index.
-
-        SQLite cannot drop a table constraint, so this rebuilds the table. It runs once: afterwards
-        the constraint is absent from the schema and the check below is a no-op.
-        """
-        cur = self.db.exec(conn, "SELECT sql FROM sqlite_master WHERE type='table' AND name='document'")
-        row = cur.fetchone()
-        if not row or not row[0] or "uniq_filestoreid_hash" not in row[0]:
-            return
-
-        self.ctx.log("Migrating document table: dropping legacy UNIQUE(filestoreId,hash)...")
-        cur = self.db.exec(conn, "PRAGMA table_info(document)")
-        existing = [r[1] for r in cur.fetchall()]
-        keep = [c for c in self.columns["document"] if c in existing]
-        cols = ", ".join(keep)
-
-        overrides = {
-            "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
-            "createdAt": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        }
-        new_cols = ",".join([f"{c} {overrides.get(c, t)}" for c, t in self.columns["document"].items()])
-        try:
-            self.db.exec(conn, "BEGIN")
-            self.db.exec(conn, f"CREATE TABLE document_migrating ({new_cols})")
-            self.db.exec(conn, f"INSERT INTO document_migrating ({cols}) SELECT {cols} FROM document")
-            # Existing rows predate sources: their identity is the filename they were uploaded
-            # under, which is what a re-upload of the same file would present again.
-            self.db.exec(
-                conn,
-                "UPDATE document_migrating SET sourceKey = displayName "
-                "WHERE sourceKey IS NULL AND displayName IS NOT NULL",
-            )
-            self.db.exec(conn, "DROP TABLE document")
-            self.db.exec(conn, "ALTER TABLE document_migrating RENAME TO document")
-            self.db.exec(conn, "COMMIT")
-            self.ctx.log("Migrated document table")
-        except Exception as e:
-            with contextlib.suppress(Exception):
-                self.db.exec(conn, "ROLLBACK")
-            self.ctx.err("Failed migrating document table", e)
-            raise
+        self.db.exec(conn, "CREATE INDEX IF NOT EXISTS idx_assistant_filestore ON assistant(filestoreId,user)")
+        self.db.exec(conn, "CREATE UNIQUE INDEX IF NOT EXISTS uniq_assistant_public ON assistant(publicId)")
+        self.db.exec(conn, "CREATE UNIQUE INDEX IF NOT EXISTS uniq_assistant_name "
+                           "ON assistant(IFNULL(user,''),filestoreId,name) WHERE enabled != 0")
+        self.db.exec(conn, "CREATE INDEX IF NOT EXISTS idx_assistant_conversation ON assistant_conversation(assistantId,updatedAt)")
+        self.db.exec(conn, "CREATE UNIQUE INDEX IF NOT EXISTS uniq_assistant_session ON assistant_conversation(assistantId,sessionId)")
+        self.db.exec(conn, "CREATE INDEX IF NOT EXISTS idx_assistant_message ON assistant_message(conversationId,id)")
 
     def to_dto(self, row, json_columns):
         return to_dto(self.ctx, row, json_columns)
@@ -577,10 +595,308 @@ class GeminiDB:
             self.prepare_filestore(filestore, id, user=user),
         )
 
+    def filestore_delete_summary(self, id, user=None, connection=None):
+        """Return the complete local impact of permanently deleting a File Store."""
+        filestore_id = int(id)
+        sql_where, params = self.get_user_filter(user, {"id": filestore_id})
+        store = self.db.one(
+            f"SELECT id, name, displayName, activeDocumentsCount, pendingDocumentsCount, "
+            f"failedDocumentsCount, sizeBytes FROM filestore {sql_where} AND id = :id",
+            params,
+            connection=connection,
+        )
+        if not store:
+            return None
+
+        impact = self.db.one(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM document d
+                    WHERE d.filestoreId = :id
+                       OR d.sourceId IN (SELECT id FROM source WHERE filestoreId = :id)) AS documents,
+                (SELECT COALESCE(SUM(COALESCE(d.sizeBytes,d.size,0)),0) FROM document d
+                    WHERE d.filestoreId = :id
+                       OR d.sourceId IN (SELECT id FROM source WHERE filestoreId = :id)) AS documentBytes,
+                (SELECT COUNT(*) FROM source WHERE filestoreId = :id) AS savedImports,
+                (SELECT COUNT(*) FROM source_run
+                    WHERE sourceId IN (SELECT id FROM source WHERE filestoreId = :id)) AS importRuns,
+                (SELECT COUNT(*) FROM assistant WHERE filestoreId = :id) AS assistants,
+                (SELECT COUNT(*) FROM assistant
+                    WHERE filestoreId = :id AND enabled != 0 AND publishedAt IS NOT NULL) AS publishedAssistants,
+                (SELECT COUNT(*) FROM assistant_conversation
+                    WHERE assistantId IN (SELECT id FROM assistant WHERE filestoreId = :id)) AS conversations,
+                (SELECT COUNT(*) FROM assistant_message
+                    WHERE conversationId IN (
+                        SELECT id FROM assistant_conversation
+                        WHERE assistantId IN (SELECT id FROM assistant WHERE filestoreId = :id)
+                    )) AS messages
+            """,
+            {"id": filestore_id},
+            connection=connection,
+        ) or {}
+        remote_counts = [store.get(key) for key in (
+            "activeDocumentsCount", "pendingDocumentsCount", "failedDocumentsCount")]
+        remote_documents = sum(int(value or 0) for value in remote_counts)
+        return {
+            **store,
+            **impact,
+            "remoteStoreExists": bool(store.get("name")),
+            "remoteDocuments": remote_documents,
+            "remoteDocumentBytes": int(store.get("sizeBytes") or 0),
+        }
+
     def delete_filestore(self, id, user=None, callback=None):
-        sql_where, params = self.get_user_filter(user, {"id": id})
-        self.db.write(f"DELETE FROM document {sql_where} AND filestoreId = :id", params, callback)
-        self.db.write(f"DELETE FROM filestore {sql_where} AND id = :id", params, callback)
+        """
+        Permanently delete the File Store and every record whose identity belongs to it.
+
+        The ownership check and all dependent deletes share one transaction. Relationship
+        deletes intentionally follow the File Store id rather than repeating the user filter:
+        if an old row has bad ownership metadata, leaving it behind would create exactly the
+        orphan and future identity conflict this operation is meant to prevent.
+        """
+        filestore_id = int(id)
+        conn = self.db.create_writer_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            impact = self.filestore_delete_summary(filestore_id, user=user, connection=conn)
+            if not impact:
+                conn.rollback()
+                return None
+
+            params = {"id": filestore_id}
+            statements = [
+                "DELETE FROM assistant_message WHERE conversationId IN ("
+                "SELECT id FROM assistant_conversation WHERE assistantId IN ("
+                "SELECT id FROM assistant WHERE filestoreId = :id))",
+                "DELETE FROM assistant_conversation WHERE assistantId IN ("
+                "SELECT id FROM assistant WHERE filestoreId = :id)",
+                "DELETE FROM assistant WHERE filestoreId = :id",
+                "DELETE FROM source_run WHERE sourceId IN (SELECT id FROM source WHERE filestoreId = :id)",
+                "DELETE FROM document WHERE filestoreId = :id "
+                "OR sourceId IN (SELECT id FROM source WHERE filestoreId = :id)",
+                "DELETE FROM source WHERE filestoreId = :id",
+                "DELETE FROM filestore WHERE id = :id",
+            ]
+            for sql in statements:
+                self.db.exec(conn, sql, params)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        if callback:
+            callback(None, 1)
+        return impact
+
+    # --- Published assistants ---------------------------------------------------------
+
+    def assistant_dto(self, row):
+        return self.to_dto(row, ["config"]) if row else None
+
+    def get_assistant(self, id, user=None):
+        sql_where, params = self.get_user_filter(user, {"id": int(id)})
+        return self.assistant_dto(self.db.one(f"SELECT * FROM assistant {sql_where} AND id = :id", params))
+
+    def get_public_assistant(self, public_id):
+        row = self.db.one(
+            "SELECT * FROM assistant WHERE publicId = :publicId AND enabled = 1 AND publishedAt IS NOT NULL",
+            {"publicId": public_id},
+        )
+        return self.assistant_dto(row)
+
+    def query_assistants(self, filestore_id, user=None, include_archived=False):
+        sql_where, params = self.get_user_filter(user, {"filestoreId": int(filestore_id)})
+        archived = "" if include_archived else " AND enabled != 0"
+        rows = self.db.all(
+            f"SELECT a.*,(SELECT COUNT(*) FROM assistant_conversation c "
+            f"WHERE c.assistantId = a.id) AS conversationCount FROM assistant a {sql_where} "
+            f"AND filestoreId = :filestoreId{archived} ORDER BY updatedAt DESC,id DESC", params,
+        )
+        return [self.assistant_dto(row) for row in rows]
+
+    def assistant_name_exists(self, filestore_id, name, user=None, exclude_id=None):
+        sql_where, params = self.get_user_filter(user, {"filestoreId": int(filestore_id), "name": name})
+        sql = (f"SELECT id FROM assistant {sql_where} AND filestoreId = :filestoreId "
+               "AND name = :name AND enabled != 0")
+        if exclude_id is not None:
+            sql += " AND id != :excludeId"
+            params["excludeId"] = int(exclude_id)
+        return self.db.one(sql, params) is not None
+
+    async def create_assistant_async(self, assistant, user=None):
+        now = datetime.now()
+        data = with_user({**assistant, "createdAt": now, "updatedAt": now}, user)
+        return await self.db.insert_async("assistant", self.columns["assistant"], data)
+
+    async def update_assistant_async(self, id, assistant, user=None):
+        data = with_user({**assistant, "id": int(id), "updatedAt": datetime.now()}, user)
+        return await self.db.update_async("assistant", self.columns["assistant"], data)
+
+    async def archive_assistant_async(self, id, user=None):
+        assistant = self.get_assistant(id, user=user)
+        if not assistant:
+            return False
+        await self.update_assistant_async(id, {"enabled": 0, "publishedAt": None}, user=user)
+        return True
+
+    async def restore_assistant_async(self, id, user=None):
+        """Restore an archived Assistant as an unpublished draft."""
+        assistant = self.get_assistant(id, user=user)
+        if not assistant:
+            return None
+        if self.assistant_name_exists(
+            assistant["filestoreId"], assistant["name"], user=user, exclude_id=assistant["id"]
+        ):
+            raise ValueError(f"An active Assistant named '{assistant['name']}' already exists")
+        await self.update_assistant_async(id, {"enabled": 1, "publishedAt": None}, user=user)
+        return self.get_assistant(id, user=user)
+
+    def assistant_delete_summary(self, id, user=None, connection=None):
+        """Describe all retained data and referring websites affected by permanent deletion."""
+        assistant_id = int(id)
+        sql_where, params = self.get_user_filter(user, {"id": assistant_id})
+        assistant = self.db.one(
+            f"SELECT id, name, publicId, enabled, publishedAt FROM assistant "
+            f"{sql_where} AND id = :id",
+            params,
+            connection=connection,
+        )
+        if not assistant:
+            return None
+
+        conversations = self.db.all(
+            "SELECT origin, pageUrl, createdAt, updatedAt FROM assistant_conversation "
+            "WHERE assistantId = :assistantId",
+            {"assistantId": assistant_id},
+            connection=connection,
+        ) or []
+        messages = self.db.scalar(
+            "SELECT COUNT(*) FROM assistant_message WHERE conversationId IN ("
+            "SELECT id FROM assistant_conversation WHERE assistantId = :assistantId)",
+            {"assistantId": assistant_id},
+            connection=connection,
+        ) or 0
+
+        domains = {}
+        unknown = 0
+        for conversation in conversations:
+            domain = referrer_domain(conversation.get("origin"), conversation.get("pageUrl"))
+            if not domain:
+                unknown += 1
+                continue
+            used_at = timestamp_text(conversation.get("updatedAt") or conversation.get("createdAt"))
+            current = domains.setdefault(domain, {
+                "domain": domain,
+                "conversationCount": 0,
+                "lastUsedAt": used_at,
+            })
+            current["conversationCount"] += 1
+            if used_at and (not current.get("lastUsedAt") or str(used_at) > str(current["lastUsedAt"])):
+                current["lastUsedAt"] = used_at
+
+        referrers = sorted(
+            domains.values(),
+            key=lambda item: (str(item.get("lastUsedAt") or ""), item["domain"]),
+            reverse=True,
+        )
+        return {
+            **assistant,
+            "published": bool(assistant.get("enabled") and assistant.get("publishedAt")),
+            "conversations": len(conversations),
+            "messages": int(messages),
+            "referrers": referrers,
+            "unknownReferrerConversations": unknown,
+        }
+
+    def delete_assistant(self, id, user=None, confirmation=None):
+        """Transactionally delete an Assistant, its conversations, and every message."""
+        assistant_id = int(id)
+        conn = self.db.create_writer_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            impact = self.assistant_delete_summary(assistant_id, user=user, connection=conn)
+            if not impact:
+                conn.rollback()
+                return None
+            if confirmation is not None and confirmation != impact["name"]:
+                raise ValueError(f'Type "{impact["name"]}" to confirm permanent deletion')
+            params = {"assistantId": assistant_id}
+            self.db.exec(conn,
+                "DELETE FROM assistant_message WHERE conversationId IN "
+                "(SELECT id FROM assistant_conversation WHERE assistantId = :assistantId)", params)
+            self.db.exec(conn,
+                "DELETE FROM assistant_conversation WHERE assistantId = :assistantId", params)
+            self.db.exec(conn, "DELETE FROM assistant WHERE id = :assistantId", params)
+            conn.commit()
+            return impact
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    async def delete_assistant_async(self, id, user=None, confirmation=None):
+        # Kept async for the route contract; the short transaction itself must remain indivisible.
+        return self.delete_assistant(id, user=user, confirmation=confirmation)
+
+    def query_assistant_conversations(self, assistant_id, user=None, take=100):
+        assistant = self.get_assistant(assistant_id, user=user)
+        if not assistant:
+            return []
+        return self.db.all(
+            "SELECT c.*,(SELECT COUNT(*) FROM assistant_message m "
+            "WHERE m.conversationId = c.id AND m.role = 'user') AS userMessageCount "
+            "FROM assistant_conversation c WHERE c.assistantId = :assistantId "
+            "ORDER BY c.updatedAt DESC,c.id DESC LIMIT :take",
+            {"assistantId": int(assistant_id), "take": min(max(int(take), 1), 500)},
+        )
+
+    def get_assistant_conversation(self, conversation_id, assistant_id=None, user=None):
+        params = {"id": int(conversation_id)}
+        sql = "SELECT * FROM assistant_conversation WHERE id = :id"
+        if assistant_id is not None:
+            if not self.get_assistant(assistant_id, user=user):
+                return None
+            sql += " AND assistantId = :assistantId"
+            params["assistantId"] = int(assistant_id)
+        return self.db.one(sql, params)
+
+    def find_assistant_conversation(self, assistant_id, session_id):
+        return self.db.one(
+            "SELECT * FROM assistant_conversation WHERE assistantId = :assistantId AND sessionId = :sessionId",
+            {"assistantId": int(assistant_id), "sessionId": session_id},
+        )
+
+    async def create_assistant_conversation_async(self, assistant, session_id, origin, page_url, user_agent):
+        now = datetime.now()
+        return await self.db.insert_async("assistant_conversation", self.columns["assistant_conversation"], {
+            "assistantId": assistant["id"], "user": assistant.get("user"), "createdAt": now, "updatedAt": now,
+            "sessionId": session_id, "origin": origin, "pageUrl": page_url, "userAgent": user_agent,
+            "status": "open", "messageCount": 0,
+        })
+
+    def query_assistant_messages(self, conversation_id):
+        rows = self.db.all(
+            "SELECT * FROM assistant_message WHERE conversationId = :conversationId ORDER BY id",
+            {"conversationId": int(conversation_id)},
+        )
+        return [self.to_dto(row, ["citations"]) for row in rows]
+
+    async def add_assistant_message_async(self, conversation, role, content, citations=None, error=None):
+        message_id = await self.db.insert_async("assistant_message", self.columns["assistant_message"], {
+            "conversationId": conversation["id"], "createdAt": datetime.now(), "role": role,
+            "content": content, "citations": citations or [], "error": error,
+        })
+        count = int(conversation.get("messageCount") or 0) + 1
+        title = conversation.get("title") or (content[:100] if role == "user" else None)
+        await self.db.update_async("assistant_conversation", self.columns["assistant_conversation"], {
+            "id": conversation["id"], "updatedAt": datetime.now(), "title": title,
+            "messageCount": count, "lastMessage": content[:500],
+        })
+        conversation.update({"messageCount": count, "title": title, "lastMessage": content[:500]})
+        return message_id
 
     def document_filter(self, query: Dict[str, Any], args=None, user=None):
         """

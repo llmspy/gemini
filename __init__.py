@@ -1,10 +1,12 @@
 import asyncio
 import hashlib
+import inspect
 import io
 import json
 import mimetypes
 import os
 import posixpath
+import re
 import time
 import zipfile
 from datetime import datetime
@@ -15,6 +17,7 @@ from google.genai.errors import ClientError
 
 from . import ingest
 from . import crawl
+from . import assistants
 from . import db as g_db_module
 from .db import GeminiDB, category_ancestors
 from .upload_worker import UploadWorker
@@ -110,6 +113,12 @@ def install(ctx):
             {"error": {"errorCode": "Forbidden", "message": f"Requires the '{required}' role"}},
             status=403,
         )
+
+    def signed_in_error(request):
+        """Assistant prompts and deployment IDs are private even when ordinary catalogue reads are shared."""
+        if ctx.is_auth_enabled() and not ctx.get_username(request):
+            return web.json_response(ctx.error_auth_required, status=401)
+        return None
 
     def global_config_path():
         # `default` is the anonymous user and the tail of the preference cascade, so this file is
@@ -689,6 +698,43 @@ def install(ctx):
 
     ctx.add_post("filestores", create_filestore)
 
+    async def filestore_delete_summary(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        id = request.match_info["id"]
+        summary = g_db.filestore_delete_summary(id, user=ctx.get_username(request))
+        if not summary:
+            raise web.HTTPNotFound(text="File Store does not exist")
+        if summary.get("name"):
+            try:
+                remote = g_client.file_search_stores.get(name=summary["name"])
+                summary.update({
+                    "remoteStoreExists": True,
+                    "remoteDocuments": sum(int(value or 0) for value in (
+                        remote.active_documents_count,
+                        remote.pending_documents_count,
+                        remote.failed_documents_count,
+                    )),
+                    "remoteDocumentBytes": int(remote.size_bytes or 0),
+                })
+            except ClientError as e:
+                if e.code == 404:
+                    summary.update({
+                        "remoteStoreExists": False,
+                        "remoteDocuments": 0,
+                        "remoteDocumentBytes": 0,
+                    })
+                else:
+                    ctx.err(f"Could not refresh delete summary for {summary['name']}", e)
+            except Exception as e:
+                # The stored counts are still a useful confirmation preview. A transient stats
+                # failure must not make an already-unavailable remote store impossible to clean up.
+                ctx.err(f"Could not refresh delete summary for {summary['name']}", e)
+        return web.json_response(summary)
+
+    ctx.add_get("filestores/{id}/delete-summary", filestore_delete_summary)
+
     async def delete_filestore(request):
         denied = auth_error(request)
         if denied:
@@ -697,18 +743,36 @@ def install(ctx):
         user = ctx.get_username(request)
         row = g_db.get_filestore(id, user=user)
         if not row:
-            raise Exception("Filestore does not exist")
+            raise web.HTTPNotFound(text="File Store does not exist")
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        confirmation = body.get("confirm") if isinstance(body, dict) else None
+        display_name = str(row.get("displayName") or "")
+        if confirmation != display_name:
+            return web.json_response(ctx.create_error_response(
+                f'Type "{display_name}" to confirm permanent deletion', "ConfirmationRequired"), status=400)
 
         name = row.get("name")
         if name:
             ctx.dbg(f"Deleting filestore {name} in Gemini...")
-            g_client.file_search_stores.delete(name=name, config={"force": True})
+            try:
+                g_client.file_search_stores.delete(name=name, config={"force": True})
+            except ClientError as e:
+                if e.code == 404:
+                    ctx.dbg(f"Filestore {name} was already deleted in Gemini")
+                else:
+                    raise
         else:
             ctx.dbg(f"Filestore {id} has no name, skipping Gemini deletion...")
 
-        ctx.dbg(f"Filestore {name} deleted in Gemini, removing local record...")
-        g_db.delete_filestore(id, user=user)
-        return web.json_response({})
+        ctx.dbg(f"Filestore {name} deleted in Gemini, removing all related local data...")
+        impact = g_db.delete_filestore(id, user=user)
+        if not impact:
+            raise web.HTTPNotFound(text="File Store does not exist")
+        return web.json_response({"deleted": impact})
 
     ctx.add_delete("filestores/{id}", delete_filestore)
 
@@ -1836,6 +1900,468 @@ def install(ctx):
         return web.json_response(result)
 
     ctx.add_post("sources/{id}/run", run_source)
+
+    # --- Published assistants ----------------------------------------------------------
+
+    assistant_limiter = assistants.MinuteLimiter()
+    widget_path = os.path.join(os.path.dirname(__file__), "ui", "assistant-widget.js")
+    marked_path = os.path.join(os.path.dirname(inspect.getfile(ctx.__class__)), "ui", "lib", "marked.min.mjs")
+
+    def bundled_markdown_source():
+        with open(marked_path, encoding="utf-8") as f:
+            source = f.read()
+        source = re.sub(r"(?m)^//# sourceMappingURL=.*$", "", source)
+        export = re.search(r"\bexport\{([^{}]*)\};", source)
+        if not export:
+            raise ValueError("Bundled Marked module has no export declaration")
+        binding = re.search(r"(?:^|,)\s*([A-Za-z_$][\w$]*)\s+as\s+marked(?=\s*(?:,|$))", export.group(1))
+        if not binding:
+            raise ValueError("Bundled Marked module does not export marked")
+        return source[:export.start()] + f"return {binding.group(1)};" + source[export.end():]
+
+    def request_base_url(request):
+        return f"{request.scheme}://{request.host}"
+
+    def assistant_dto(row, request):
+        if not row:
+            return None
+        dto = dict(row)
+        dto["config"] = assistants.normalize_config(dto.get("config"))
+        dto["published"] = bool(dto.get("publishedAt") and dto.get("enabled"))
+        src = f"{request_base_url(request)}/ext/gemini/public/assistants/widget.js?g={dto['publicId']}"
+        dto["scriptUrl"] = src
+        dto["embedCode"] = f'<script src="{src}" async></script>'
+        return dto
+
+    async def list_assistants(request):
+        denied = signed_in_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        filestore_id = int(request.match_info["id"])
+        if not g_db.get_filestore(filestore_id, user=user):
+            raise web.HTTPNotFound(text="File Store does not exist")
+        return web.json_response([assistant_dto(x, request) for x in g_db.query_assistants(
+            filestore_id, user=user, include_archived=True)])
+
+    ctx.add_get("filestores/{id}/assistants", list_assistants)
+
+    async def create_assistant(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        filestore_id = int(request.match_info["id"])
+        if not g_db.get_filestore(filestore_id, user=user):
+            raise web.HTTPNotFound(text="File Store does not exist")
+        body = await request.json()
+        name = str(body.get("name") or "").strip()[:200]
+        if not name:
+            return web.json_response(ctx.create_error_response("Name is required", "ValidationError"), status=400)
+        if g_db.assistant_name_exists(filestore_id, name, user=user):
+            return web.json_response(ctx.create_error_response(
+                f"An Assistant named '{name}' already exists", "AlreadyExists"), status=409)
+        try:
+            config = assistants.validate_config(body.get("config"))
+        except ValueError as e:
+            return web.json_response(ctx.create_error_response(str(e), "ValidationError"), status=400)
+        publish = bool(body.get("published"))
+        assistant_id = await g_db.create_assistant_async({
+            "filestoreId": filestore_id,
+            "name": name,
+            "publicId": assistants.new_public_id(),
+            "enabled": 1,
+            "publishedAt": datetime.now() if publish else None,
+            "config": config,
+        }, user=user)
+        if publish:
+            await g_db.update_filestore_async(filestore_id, {"visibility": "public"}, user=user)
+        return web.json_response(assistant_dto(g_db.get_assistant(assistant_id, user=user), request))
+
+    ctx.add_post("filestores/{id}/assistants", create_assistant)
+
+    async def get_assistant(request):
+        denied = signed_in_error(request)
+        if denied:
+            return denied
+        row = g_db.get_assistant(int(request.match_info["id"]), user=ctx.get_username(request))
+        if not row:
+            raise web.HTTPNotFound(text="Assistant does not exist")
+        return web.json_response(assistant_dto(row, request))
+
+    ctx.add_get("assistants/{id}", get_assistant)
+
+    async def update_assistant(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        user = ctx.get_username(request)
+        assistant_id = int(request.match_info["id"])
+        current = g_db.get_assistant(assistant_id, user=user)
+        if not current:
+            raise web.HTTPNotFound(text="Assistant does not exist")
+        if current.get("enabled") == 0:
+            return web.json_response(ctx.create_error_response(
+                "Restore this Assistant before editing or publishing it", "AssistantArchived"), status=409)
+        body = await request.json()
+        name = str(body.get("name", current.get("name")) or "").strip()[:200]
+        if not name:
+            return web.json_response(ctx.create_error_response("Name is required", "ValidationError"), status=400)
+        if g_db.assistant_name_exists(current["filestoreId"], name, user=user, exclude_id=assistant_id):
+            return web.json_response(ctx.create_error_response(
+                f"An Assistant named '{name}' already exists", "AlreadyExists"), status=409)
+        try:
+            config = assistants.validate_config(body.get("config", current.get("config")))
+        except ValueError as e:
+            return web.json_response(ctx.create_error_response(str(e), "ValidationError"), status=400)
+        published = bool(body.get("published", current.get("publishedAt") is not None))
+        public_id = assistants.new_public_id() if body.get("regeneratePublicId") else current["publicId"]
+        await g_db.update_assistant_async(assistant_id, {
+            "name": name,
+            "publicId": public_id,
+            # Lifecycle transitions have dedicated routes. An ordinary save must never silently
+            # restore or archive an Assistant as a side effect.
+            "enabled": current.get("enabled", 1),
+            "publishedAt": current.get("publishedAt") or datetime.now() if published else None,
+            "config": config,
+        }, user=user)
+        if published:
+            await g_db.update_filestore_async(current["filestoreId"], {"visibility": "public"}, user=user)
+        return web.json_response(assistant_dto(g_db.get_assistant(assistant_id, user=user), request))
+
+    ctx.add_put("assistants/{id}", update_assistant)
+
+    async def assistant_delete_summary(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        summary = g_db.assistant_delete_summary(
+            int(request.match_info["id"]), user=ctx.get_username(request))
+        if not summary:
+            raise web.HTTPNotFound(text="Assistant does not exist")
+        return web.json_response(summary)
+
+    ctx.add_get("assistants/{id}/delete-summary", assistant_delete_summary)
+
+    async def archive_assistant(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        found = await g_db.archive_assistant_async(int(request.match_info["id"]), user=ctx.get_username(request))
+        if not found:
+            raise web.HTTPNotFound(text="Assistant does not exist")
+        return web.json_response({"archived": True, "conversationsRetained": True})
+
+    ctx.add_delete("assistants/{id}", archive_assistant)
+
+    async def restore_assistant(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        assistant_id = int(request.match_info["id"])
+        user = ctx.get_username(request)
+        try:
+            restored = await g_db.restore_assistant_async(assistant_id, user=user)
+        except ValueError as e:
+            return web.json_response(ctx.create_error_response(
+                str(e), "AlreadyExists"), status=409)
+        if not restored:
+            raise web.HTTPNotFound(text="Assistant does not exist")
+        return web.json_response(assistant_dto(restored, request))
+
+    ctx.add_post("assistants/{id}/restore", restore_assistant)
+
+    async def delete_assistant(request):
+        denied = auth_error(request)
+        if denied:
+            return denied
+        assistant_id = int(request.match_info["id"])
+        user = ctx.get_username(request)
+        summary = g_db.assistant_delete_summary(assistant_id, user=user)
+        if not summary:
+            raise web.HTTPNotFound(text="Assistant does not exist")
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        confirmation = body.get("confirm") if isinstance(body, dict) else None
+        if confirmation != summary["name"]:
+            return web.json_response(ctx.create_error_response(
+                f'Type "{summary["name"]}" to confirm permanent deletion',
+                "ConfirmationRequired"), status=400)
+        try:
+            deleted = await g_db.delete_assistant_async(
+                assistant_id, user=user, confirmation=confirmation)
+        except ValueError as e:
+            return web.json_response(ctx.create_error_response(
+                str(e), "ConfirmationRequired"), status=400)
+        if not deleted:
+            raise web.HTTPNotFound(text="Assistant does not exist")
+        return web.json_response({"deleted": deleted})
+
+    ctx.add_delete("assistants/{id}/permanent", delete_assistant)
+
+    async def assistant_conversations(request):
+        denied = signed_in_error(request)
+        if denied:
+            return denied
+        assistant_id = int(request.match_info["id"])
+        rows = g_db.query_assistant_conversations(
+            assistant_id, user=ctx.get_username(request), take=request.query.get("take", 100))
+        return web.json_response(rows)
+
+    ctx.add_get("assistants/{id}/conversations", assistant_conversations)
+
+    async def assistant_conversation(request):
+        denied = signed_in_error(request)
+        if denied:
+            return denied
+        assistant_id = int(request.match_info["id"])
+        row = g_db.get_assistant_conversation(
+            int(request.match_info["conversationId"]), assistant_id=assistant_id,
+            user=ctx.get_username(request))
+        if not row:
+            raise web.HTTPNotFound(text="Conversation does not exist")
+        row["messages"] = g_db.query_assistant_messages(row["id"])
+        return web.json_response(row)
+
+    ctx.add_get("assistants/{id}/conversations/{conversationId}", assistant_conversation)
+
+    def cors_headers(request, allowed):
+        origin = request.headers.get("Origin")
+        headers = {"Vary": "Origin"}
+        if allowed:
+            headers["Access-Control-Allow-Origin"] = origin or "*"
+        return headers
+
+    def public_assistant_or_error(request):
+        public_id = request.match_info.get("publicId") or request.query.get("g") or ""
+        row = g_db.get_public_assistant(public_id)
+        store = g_db.get_filestore(row["filestoreId"], user=row.get("user")) if row else None
+        if not row or not store or store.get("visibility") != "public":
+            raise web.HTTPNotFound(text="Assistant is unavailable")
+        return row
+
+    async def public_assistant_script(request):
+        headers = {"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}
+        public_id = request.query.get("g") or ""
+        row = g_db.get_public_assistant(public_id)
+        store = g_db.get_filestore(row["filestoreId"], user=row.get("user")) if row else None
+        if not row or not store or store.get("visibility") != "public":
+            message = "Gemini Assistant widget failed to load: Assistant is unavailable (404)"
+            return web.Response(text=f"console.error({json.dumps(message)});",
+                                content_type="application/javascript", headers=headers)
+        try:
+            with open(widget_path, encoding="utf-8") as f:
+                widget = f.read()
+            try:
+                markdown = bundled_markdown_source()
+            except Exception as error:
+                ctx.err("Failed embedding the bundled Marked renderer", error)
+                markdown = ('console.warn("Gemini Assistant Markdown renderer is unavailable; '
+                            'using plain text.");return null;')
+            config = assistants.public_config(row, request_base_url(request))
+            source = (f"(()=>{{const CONFIG={json.dumps(config, separators=(',', ':'))};"
+                      f"const SCRIPT=document.currentScript;const MARKDOWN=(()=>{{\n{markdown}\n}})();"
+                      f"const mount=()=>{{\n{widget}\n}};"
+                      "if(document.body)mount();else addEventListener('DOMContentLoaded',mount,{once:true});})();")
+        except Exception as error:
+            ctx.err("Failed generating Gemini Assistant widget script", error)
+            source = 'console.error("Gemini Assistant widget failed to load. Check the server logs for details.");'
+        return web.Response(text=source, content_type="application/javascript", headers=headers)
+
+    ctx.add_get("public/assistants/widget.js", public_assistant_script)
+
+    def assistant_generation(row, store, messages):
+        config = assistants.normalize_config(row.get("config"))
+        behavior = config["behavior"]
+        system = assistants.system_instruction(behavior)
+        file_search = {"file_search_store_names": [store["name"]], "top_k": 10}
+        expression = assistants.metadata_filter(config["scope"])
+        if expression:
+            file_search["metadata_filter"] = expression
+        contents = [{
+            "role": "model" if m["role"] == "assistant" else "user",
+            "parts": [{"text": m.get("content") or ""}],
+        } for m in messages[-20:] if m.get("role") in ("user", "assistant")]
+        return behavior, {
+            "model": assistants.resolve_model(
+                config, os.getenv("GEMINI_ASSISTANT_MODEL", "gemini-flash-latest")),
+            "contents": contents,
+            "config": {"system_instruction": system, "tools": [{"file_search": file_search}]},
+        }
+
+    def result_citations(result, enabled=True):
+        citations, seen = [], set()
+        if enabled:
+            for candidate in getattr(result, "candidates", None) or []:
+                grounding = getattr(candidate, "grounding_metadata", None)
+                for chunk in getattr(grounding, "grounding_chunks", None) or []:
+                    context = getattr(chunk, "retrieved_context", None)
+                    if not context:
+                        continue
+                    title = getattr(context, "title", None) or "Source"
+                    url = getattr(context, "uri", None)
+                    key = (title, url)
+                    if key not in seen:
+                        seen.add(key)
+                        citations.append({"title": title, "url": url})
+        return citations
+
+    def resolve_citation_urls(citations, store, user):
+        """Replace Gemini retrieval URIs with the imported document's public source URL."""
+        if not citations:
+            return citations
+        documents = g_db.query_documents_all({
+            "filestoreId": store["id"], "fields": "displayName,sourceKey,sourceUrl",
+        }, user=user)
+        source_urls = {}
+        for doc in documents:
+            source_url = doc.get("sourceUrl")
+            if not source_url:
+                continue
+            for value in (doc.get("displayName"), doc.get("sourceKey")):
+                if not value:
+                    continue
+                key = str(value).strip().lower()
+                source_urls.setdefault(key, source_url)
+                source_urls.setdefault(posixpath.basename(key), source_url)
+        for citation in citations:
+            title = str(citation.get("title") or "").strip().lower()
+            source_url = source_urls.get(title) or source_urls.get(posixpath.basename(title))
+            if source_url:
+                citation["url"] = source_url
+            elif not str(citation.get("url") or "").startswith(("http://", "https://")):
+                citation["url"] = None
+        return citations
+
+    def assistant_answer(row, store, messages):
+        behavior, request = assistant_generation(row, store, messages)
+        result = g_client.models.generate_content(**request)
+        text = (getattr(result, "text", None) or "").strip() or behavior["fallback"]
+        citations = resolve_citation_urls(
+            result_citations(result, behavior["citations"]), store, row.get("user"))
+        return text, citations
+
+    async def public_assistant_chat(request):
+        row = public_assistant_or_error(request)
+        config = assistants.normalize_config(row.get("config"))
+        allowed_origins = config["hosting"]["allowedOrigins"]
+        origin = request.headers.get("Origin")
+        allowed = assistants.origin_allowed(origin, allowed_origins)
+        headers = cors_headers(request, allowed)
+        if not allowed:
+            return web.json_response(ctx.create_error_response(
+                "This website is not allowed to use this Assistant", "OriginNotAllowed"),
+                status=403, headers=headers)
+        limit = config["hosting"]["requestsPerMinute"]
+        remote = request.remote or "unknown"
+        if not assistant_limiter.allow((row["id"], remote), limit):
+            return web.json_response(ctx.create_error_response(
+                "Too many requests. Please wait a moment and try again.", "RateLimited"),
+                status=429, headers={**headers, "Retry-After": "60"})
+        try:
+            body = json.loads(await request.text())
+        except Exception:
+            return web.json_response(ctx.create_error_response("Invalid request", "ValidationError"),
+                                     status=400, headers=headers)
+        message = str(body.get("message") or "").strip()[:8000]
+        session_id = str(body.get("sessionId") or "").strip()[:100]
+        if not message or not re.fullmatch(r"[A-Za-z0-9._~-]{12,100}", session_id):
+            return web.json_response(ctx.create_error_response(
+                "A message and valid sessionId are required", "ValidationError"), status=400, headers=headers)
+        store = g_db.get_filestore(row["filestoreId"], user=row.get("user"))
+        if not store or not store.get("name"):
+            return web.json_response(ctx.create_error_response("Assistant knowledge base is unavailable"),
+                                     status=503, headers=headers)
+        conversation = g_db.find_assistant_conversation(row["id"], session_id)
+        if not conversation:
+            conversation_id = await g_db.create_assistant_conversation_async(
+                row, session_id, origin, str(body.get("pageUrl") or "")[:2000],
+                request.headers.get("User-Agent", "")[:1000])
+            conversation = g_db.get_assistant_conversation(conversation_id)
+        await g_db.add_assistant_message_async(conversation, "user", message)
+        history = g_db.query_assistant_messages(conversation["id"])
+        if body.get("stream"):
+            response = web.StreamResponse(status=200, headers=headers)
+            response.content_type = "application/x-ndjson"
+            await response.prepare(request)
+            loop = asyncio.get_running_loop()
+            queue = asyncio.Queue()
+
+            def produce():
+                try:
+                    behavior, generation = assistant_generation(row, store, history)
+                    for chunk in g_client.models.generate_content_stream(**generation):
+                        try:
+                            delta = getattr(chunk, "text", None) or ""
+                        except Exception:
+                            delta = ""
+                        loop.call_soon_threadsafe(queue.put_nowait, ("chunk", delta, result_citations(
+                            chunk, behavior["citations"])))
+                    loop.call_soon_threadsafe(queue.put_nowait, ("done", behavior, None))
+                except Exception as error:
+                    loop.call_soon_threadsafe(queue.put_nowait, ("error", error, None))
+
+            producer = loop.run_in_executor(None, produce)
+            chunks, citations, citation_keys, failure, connected = [], [], set(), None, True
+            while True:
+                kind, value, found = await queue.get()
+                if kind == "chunk":
+                    if value:
+                        chunks.append(value)
+                        if connected:
+                            try:
+                                await response.write((json.dumps({"delta": value}) + "\n").encode())
+                            except ConnectionResetError:
+                                connected = False
+                    for citation in found or []:
+                        key = (citation.get("title"), citation.get("url"))
+                        if key not in citation_keys:
+                            citation_keys.add(key)
+                            citations.append(citation)
+                elif kind == "error":
+                    failure = value
+                    break
+                else:
+                    behavior = value
+                    break
+            await producer
+            if failure:
+                ctx.err(f"Assistant {row['id']} streaming chat failed", failure)
+                fallback = config["behavior"]["fallback"]
+                await g_db.add_assistant_message_async(
+                    conversation, "assistant", fallback, error=ctx.error_message(failure))
+                if connected:
+                    await response.write((json.dumps({"error": "The Assistant could not answer right now."}) + "\n").encode())
+            else:
+                answer = "".join(chunks).strip() or behavior["fallback"]
+                citations = resolve_citation_urls(citations, store, row.get("user"))
+                await g_db.add_assistant_message_async(conversation, "assistant", answer, citations=citations)
+                if connected:
+                    if not chunks:
+                        await response.write((json.dumps({"delta": answer}) + "\n").encode())
+                    await response.write((json.dumps({"done": True, "citations": citations,
+                                                      "conversationId": conversation["id"]}) + "\n").encode())
+            if connected:
+                await response.write_eof()
+            return response
+        try:
+            answer, citations = await asyncio.get_running_loop().run_in_executor(
+                None, assistant_answer, row, store, history)
+            await g_db.add_assistant_message_async(conversation, "assistant", answer, citations=citations)
+            return web.json_response({
+                "conversationId": conversation["id"], "message": answer, "citations": citations,
+            }, headers=headers)
+        except Exception as e:
+            ctx.err(f"Assistant {row['id']} chat failed", e)
+            await g_db.add_assistant_message_async(
+                conversation, "assistant", config["behavior"]["fallback"], error=ctx.error_message(e))
+            return web.json_response(ctx.create_error_response(
+                "The Assistant could not answer right now. Please try again.", "AssistantError"),
+                status=500, headers=headers)
+
+    ctx.add_post("public/assistants/{publicId}/chat", public_assistant_chat)
 
     # --- filter capabilities ------------------------------------------------------------
 

@@ -446,6 +446,107 @@ Source links are resolved in this order:
 Set accurate Source URLs when you want readers sent to a public documentation site rather than a
 cache file. Source cards can be expanded to inspect the retrieved excerpt.
 
+## Publishing a website Assistant
+
+Open a File Store and select **Assistants** to create a document-grounded chat widget for a
+website. Each named Assistant has its own document scope, private behavior prompt, appearance,
+hosting rules, public deployment ID, and retained customer conversations.
+
+The Assistant designer includes:
+
+- a visitor-facing title, description, welcome message, and up to six suggested questions;
+- optional category, doc type, status, locale, product, version, and tag filters;
+- Documentation Guide, Technical Troubleshooter, Customer Support, Developer/API Assistant,
+  Product Advisor, Onboarding Guide, and Policy and Procedures prompt templates;
+- grounded-answer, citation, response-detail, and fallback-message controls;
+- Auto, Light, Dark, Nord, and Matrix color presets, per-color overrides, launcher position, and icon;
+- an optional origin allowlist and per-client requests-per-minute limit; and
+- a live appearance preview, deployment code, and customer conversation review.
+
+Filters and the system prompt are applied by the server. They are never included in the generated
+JavaScript and cannot be overridden by a host page. Publishing marks the File Store as public and
+creates a stable deployment URL. A typical embed is:
+
+Each template supplies editable specialist instructions. The server combines them with shared RAG
+rules for retrieval, grounding, conflicting documents, prompt-injection resistance, conversation
+context, fallback handling, and response formatting. This keeps custom Assistants consistent while
+allowing their role and answer strategy to be tailored to the use case.
+
+```html
+<script
+  src="https://chat.example.com/ext/gemini/public/assistants/widget.js?g=abc123"
+  async>
+</script>
+```
+
+The generated script creates an isolated Shadow DOM component and has no dependency on the host
+website's CSS or JavaScript framework. It stores the visitor's session and recent visible messages
+in that browser's local storage. The authoritative conversation and every user/assistant message
+are retained in the Gemini database so support teams can review recurring questions and missing
+documentation later.
+
+Each theme supplies defaults for the widget's `accent-bg`, `panel-bg`, `conversation-bg`,
+`assistant-bg`, `user-bg`, `primary-text`, `muted-text`, `link-text`, `error-text`, `warning-text`,
+`assistant-text`, `assistant-border`, `user-text`, `user-border`, `panel-border`, and `focus-border`
+CSS variables, plus a per-theme `font-family`. The Appearance
+editor records independent overrides for Light, Dark, and Nord. Use the reset action beside one
+color to return it to that theme's default, or **Reset theme appearance** to restore its complete preset.
+Only explicit overrides are saved. Auto has no separate palette: it follows the browser's
+`prefers-color-scheme` setting and uses the configured Light or Dark colors, including their saved
+overrides. Font-family overrides use normal CSS font-stack syntax and are also stored separately for
+each theme.
+
+### Host-controlled appearance
+
+A host page may override only these presentation choices with `data-*` attributes:
+
+```html
+<script
+  src="https://chat.example.com/ext/gemini/public/assistants/widget.js?g=abc123"
+  data-theme="dark"
+  data-position="bottom-left"
+  data-accent="#7c3aed"
+  data-icon="chat"
+  async>
+</script>
+```
+
+Supported themes are `auto`, `light`, `dark`, `nord`, and `matrix`; positions are `bottom-left` and
+`bottom-right`; icons are `sparkles`, `chat`, and `help`. `data-open="true"` opens the panel when it
+loads. Document scope, prompts, model selection, origin rules, and rate limits cannot be changed by
+the embed.
+
+### Restricting host websites
+
+Leave **Allowed origins** empty when an Assistant is intentionally used by many internal or public
+sites. Otherwise enter one HTTP(S) origin per line:
+
+```text
+https://docs.example.com
+https://*.example.com
+http://localhost:5173
+```
+
+An exact origin includes its scheme and port. A wildcard matches subdomains but not the apex domain,
+so add `https://example.com` separately when both are required. The browser can download a public
+`<script>` without CORS permission; the security check is applied to every chat request using its
+`Origin` header. Requests without an origin are refused when an allowlist is configured.
+
+The public deployment ID is not a secret or authentication credential. Origin rules prevent normal
+browser use from unapproved sites, while the rate limit reduces abuse by direct HTTP callers.
+Regenerate the deployment ID to invalidate every existing embed immediately.
+
+### Customer conversation retention
+
+Select a saved Assistant and open **Conversations** to review the originating website, page URL,
+message count, questions, answers, and citations. Archiving an Assistant or deleting its File Store
+disables the public deployment but deliberately retains its conversation history for later review.
+Use **Delete permanently** only when the Assistant configuration, public deployment, conversations,
+messages, and citations should all be irreversibly removed.
+
+The public endpoint uses `gemini-flash-latest` by default. Set `GEMINI_ASSISTANT_MODEL` in the server
+environment to choose a different Gemini model for every published Assistant.
+
 ## Editing many documents
 
 Select documents with their checkboxes. You can select the current page or extend the selection to

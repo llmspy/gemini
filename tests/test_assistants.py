@@ -64,7 +64,7 @@ class AssistantTests(unittest.TestCase):
         self.assertEqual(public["chatUrl"], "https://chat.example/ext/gemini/public/assistants/test/chat")
         self.assertNotIn("markdownUrl", public)
         self.assertEqual(public["notice"], "Conversations may be reviewed to improve support.")
-        self.assertEqual(public["launch"], {"openMode": "", "keyboardShortcut": False})
+        self.assertEqual(public["launch"], {"openMode": "", "keyboardShortcut": True})
 
     def test_assistant_model_override_is_normalized_and_stays_server_side(self):
         config = assistants.normalize_config({"model": " models/gemini-3.1-pro-preview "})

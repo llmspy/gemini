@@ -204,7 +204,7 @@ DEFAULT_CONFIG = {
         "citations": True,
         "responseStyle": "balanced",
         "openMode": "",
-        "keyboardShortcut": False,
+        "keyboardShortcut": True,
         "fallback": "I couldn't find that in the available documents.",
         "notice": "Conversations may be reviewed to improve support.",
     },
@@ -287,7 +287,7 @@ def normalize_config(value=None):
         if behavior.get("responseStyle") in ("concise", "balanced", "detailed") else "balanced"
     behavior["openMode"] = behavior.get("openMode") \
         if behavior.get("openMode") in ("", "page-load", "page-bottom") else ""
-    behavior["keyboardShortcut"] = bool(behavior.get("keyboardShortcut", False))
+    behavior["keyboardShortcut"] = bool(behavior.get("keyboardShortcut", True))
     behavior["fallback"] = str(behavior.get("fallback") or DEFAULT_CONFIG["behavior"]["fallback"]).strip()[:1000]
     notice = behavior.get("notice", DEFAULT_CONFIG["behavior"]["notice"])
     behavior["notice"] = str(notice if notice is not None else "").strip()[:500]

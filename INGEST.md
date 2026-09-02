@@ -296,8 +296,12 @@ is expanded per document before hashing:
 | `{title}` | the item's title, or `{name}` |
 
 Names are case-insensitive. A placeholder that resolves to nothing — a document in no category —
-doesn't leave `//` behind. An unknown one is left in place: `{nmae}` sitting in a URL is obvious on
-sight, where dropping it silently produces a plausible wrong link.
+doesn't leave `//` behind. Unknown placeholders and malformed templates are rejected.
+
+A variable can extract part of its value with `{variable:/pattern/}`. The first capture group is
+used, or the complete match when there is no capture group. For example,
+`{name:/^\d{4}-\d{2}-\d{2}_(.+)$/}` turns `2026-09-04_servicestack-pdf` into
+`servicestack-pdf`. A pattern that does not match is reported as an import error.
 
 Expansion runs after the category is derived and before the metadata hash, so changing the template
 reads as a metadata change on re-run — which is what makes backfilling URLs onto an existing corpus

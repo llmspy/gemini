@@ -371,6 +371,16 @@ https://docs.example.com/{pathNoExt}
 
 becomes `https://docs.example.com/guides/auth`.
 
+To extract part of a variable, use `{variable:/pattern/}`. Its first capture group is used, or the
+complete match if the pattern has no capture group. For example:
+
+```text
+https://docs.example.com/{name:/^\d{4}-\d{2}-\d{2}_(.+)$/}
+```
+
+turns the name `2026-09-04_servicestack-pdf` into the URL slug `servicestack-pdf`. A regex that is
+invalid or does not match is reported during import instead of producing a misleading URL.
+
 When a variable is appended after another variable, the UI inserts `/` first. Appending `{ext}`
 in that position inserts `.` instead. Empty expansions have duplicate slashes normalised without
 damaging `https://`.

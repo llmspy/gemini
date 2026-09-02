@@ -724,8 +724,30 @@ class SourceUrlTemplateTests(unittest.TestCase):
     def test_the_scheme_survives_slash_collapsing(self):
         self.assertTrue(self.expand("https://x/{category}/{name}", "a.md", "c").startswith("https://"))
 
-    def test_an_unknown_placeholder_is_left_visible(self):
-        self.assertEqual(self.expand("https://x/{nmae}", "a.md"), "https://x/{nmae}")
+    def test_an_unknown_placeholder_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unknown Source URL variable"):
+            self.expand("https://x/{nmae}", "a.md")
+
+    def test_regex_placeholder_uses_its_first_capture(self):
+        self.assertEqual(
+            self.expand(r"https://x/{name:/^\d{4}-\d{2}-\d{2}_(.+)$/}",
+                        "2026-09-04_servicestack-pdf.md"),
+            "https://x/servicestack-pdf",
+        )
+
+    def test_regex_placeholder_without_a_capture_uses_the_match(self):
+        self.assertEqual(
+            self.expand(r"https://x/{name:/servicestack/}", "2026-09-04_servicestack-pdf.md"),
+            "https://x/servicestack",
+        )
+
+    def test_regex_placeholder_rejects_a_non_match(self):
+        with self.assertRaisesRegex(ValueError, "did not match"):
+            self.expand(r"https://x/{name:/^release-(.+)$/}", "2026-09-04_servicestack-pdf.md")
+
+    def test_regex_placeholder_rejects_an_invalid_pattern(self):
+        with self.assertRaisesRegex(ValueError, "Invalid regex"):
+            ig.validate_template(r"https://x/{name:/([/}")
 
     def test_a_plain_url_is_untouched(self):
         self.assertEqual(self.expand("https://x/y", "a.md"), "https://x/y")

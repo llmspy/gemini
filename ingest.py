@@ -444,7 +444,29 @@ METADATA_FIELDS = (
 LIST_FIELDS = ("versions", "tags")
 
 
-_TEMPLATE_RE = re.compile(r"\{(\w+)\}")
+_TEMPLATE_RE = re.compile(r"\{(?P<name>\w+)(?::/(?P<pattern>(?:\\.|[^/])*)/)?\}")
+_TEMPLATE_KEYS = {
+    "category", "fullpath", "path", "pathnoext", "dir", "name", "filename", "ext", "title",
+}
+
+
+def validate_template(template):
+    """Validate plain and regex-extracting Source URL placeholders."""
+    if not template:
+        return
+    for match in _TEMPLATE_RE.finditer(template):
+        name = match.group("name")
+        if name.lower() not in _TEMPLATE_KEYS:
+            raise ValueError(f"Unknown Source URL variable '{{{name}}}'")
+        pattern = match.group("pattern")
+        if pattern is not None:
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"Invalid regex for Source URL variable '{{{name}}}': {e}") from e
+    remainder = _TEMPLATE_RE.sub("", template)
+    if "{" in remainder or "}" in remainder:
+        raise ValueError("Source URL contains an invalid or unmatched variable")
 
 
 def template_values(source_key, category=None, title=None, root=None):
@@ -492,12 +514,26 @@ def expand_template(template, values):
     `https://docs.acme.com/{category}/{name}` is the thing people actually mean, and for a docs
     site laid out like its URLs it's exact.
 
-    An unknown placeholder is left in place rather than blanked: `{nmae}` sitting in a URL is
-    obvious on sight, whereas dropping it silently yields a plausible wrong link.
+    `{name:/pattern/}` applies a regular expression to the value. Its first capture group is used,
+    or the full match when the expression has no capture group. A non-match is an error rather than
+    silently producing a plausible but incorrect citation URL.
     """
     if not template or "{" not in template:
         return template
-    out = _TEMPLATE_RE.sub(lambda m: str(values.get(m.group(1).lower(), m.group(0)) or ""), template)
+    validate_template(template)
+
+    def replace(match):
+        name = match.group("name")
+        value = str(values.get(name.lower(), match.group(0)) or "")
+        pattern = match.group("pattern")
+        if pattern is None:
+            return value
+        extracted = re.search(pattern, value)
+        if not extracted:
+            raise ValueError(f"Source URL regex for '{{{name}}}' did not match '{value}'")
+        return (extracted.group(1) or "") if extracted.re.groups else extracted.group(0)
+
+    out = _TEMPLATE_RE.sub(replace, template)
     # A placeholder that resolves to nothing (a document in no category) leaves `//` behind.
     scheme, sep, rest = out.partition("://")
     return scheme + sep + re.sub(r"/{2,}", "/", rest) if sep else re.sub(r"/{2,}", "/", out)
